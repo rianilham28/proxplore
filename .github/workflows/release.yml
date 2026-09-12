@@ -13,6 +13,7 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -36,13 +37,13 @@ jobs:
       # btls-sys ships bundled C/C++ (BoringSSL lineage); plain cross-gcc
       # leaves those objects on the host arch ("Relocations in generic ELF
       # (EM: 62)" at link). zig supplies a complete cross C toolchain, so
-      # cargo-zigbuild links the whole tree consistently for aarch64-linux.
+      # cargo-zigbuild links the whole tree — Rust + C — consistently.
       - if: ${{ matrix.zigbuild }}
         uses: mlugg/setup-zig@v2
         with:
           version: 0.14.1
       - if: ${{ matrix.zigbuild }}
-        run: cargo install cargo-zigbuild --version 0.23 --locked
+        run: cargo install cargo-zigbuild --version '^0.23' --locked
       - run: cargo zigbuild --release --locked --target ${{ matrix.target }} --bin proxplore
         if: ${{ matrix.zigbuild }}
       - run: cargo build --release --locked --target ${{ matrix.target }} --bin proxplore
