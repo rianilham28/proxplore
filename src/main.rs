@@ -24,6 +24,7 @@ mod providers;
 mod runner;
 
 use std::error::Error;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -111,13 +112,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut rows: Vec<&Arc<dyn Provider>> = registry.iter().collect();
         rows.sort_by_key(|p| p.id());
         for p in rows {
-            println!(
+            // Rust ignores SIGPIPE, so a closed consumer (head/grep) surfaces
+            // as a write error — exit cleanly like any unix filter, not panic
+            if writeln!(
+                std::io::stdout(),
                 "{:<20} {:<26} {:<22} {}",
                 p.id(),
                 p.protocols(),
                 p.refresh(),
                 p.site()
-            );
+            )
+            .is_err()
+            {
+                return Ok(());
+            }
         }
         return Ok(());
     }
