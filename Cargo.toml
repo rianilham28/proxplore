@@ -1,0 +1,34 @@
+[package]
+name = "proxplore"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Harvest free HTTP/HTTPS/SOCKS4/SOCKS5 proxies from keyless public sources into a deduplicated proxies.txt"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+futures = "0.3"
+
+# HTTP lane: wreq is the curl_cffi equivalent — real Chrome TLS/H2 fingerprints
+# via request-level .emulation(), per-request proxy for rotating gateways.
+wreq = { version = "0.16", features = ["charset", "gzip", "brotli", "zstd"] }
+wreq-util = "0.2"
+
+# Parsing & normalization
+regex = "1"
+serde_json = "1"
+base64 = "0.22"
+
+# Config & resources
+clap = { version = "4", features = ["derive", "env"] }
+rlimit = "0.11"
+url = "2.5"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# unwind (not abort): provider chains run in tasks and a parser panic is caught
+# per-feed; aborting the process would turn one bad page into a lost harvest.
+panic = "unwind"
+strip = true

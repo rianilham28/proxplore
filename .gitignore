@@ -1,0 +1,8 @@
+/target
+/dist
+/.venv
+*.tmp
+
+# generated harvest output — rebuild with one run, never committed
+/proxies.txt
+/proxies.unverified.txt
