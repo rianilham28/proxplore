@@ -53,13 +53,14 @@ jobs:
           set -euo pipefail
           bin="target/${{ matrix.target }}/release/proxplore"
           strip "$bin" || true
-          dist="dist/proxplore-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          tarball="proxplore-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          dist="dist/${tarball%.tar.gz}"
           mkdir -p "$dist"
           cp "$bin" README.md "$dist/"
-          tar -C dist -czf "dist/proxplore-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" \
-            "$(basename "$dist")"
-          sha256sum "dist/proxplore-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" \
-            > "dist/proxplore-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz.sha256"
+          tar -C dist -czf "dist/$tarball" "$(basename "$dist")"
+          # checksums record the bare file name so `sha256sum -c` works
+          # side-by-side with the downloaded asset
+          ( cd dist && sha256sum "$tarball" > "$tarball.sha256" )
       - uses: actions/upload-artifact@v4
         with:
           name: pkg-${{ matrix.target }}
