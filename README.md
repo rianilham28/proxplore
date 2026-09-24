@@ -59,8 +59,8 @@ Rust counterpart of curl_cffi's `impersonate`.
 
 - `ci.yml`: fmt + clippy `-D warnings` + `cargo test` + release-build,
   ubuntu/macos.
-- `release.yml`: tag `v*` → linux-gnu x86_64/aarch64 + macOS universal
-  binaries, sha256'd, attached to the GitHub Release.
+- `release.yml`: tag `v*` → linux-gnu x86_64/aarch64 + separate macOS
+  x86_64/aarch64 archives, sha256'd, attached to the GitHub Release.
 - proxalyze's nightly pool refresh checks this repo out and runs
   `cargo build --release --locked --bin proxplore` — keep `Cargo.lock`
   committed and the binary name stable.
