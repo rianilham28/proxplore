@@ -23,6 +23,7 @@ mod parse;
 mod providers;
 mod runner;
 
+use std::collections::HashSet;
 use std::error::Error;
 use std::io::Write;
 use std::sync::Arc;
@@ -74,6 +75,10 @@ struct Cli {
     /// Debug logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Suppress info logs (--verbose takes precedence if both are set)
+    #[arg(short, long)]
+    quiet: bool,
 }
 
 /// Registry invariant: every provider id is non-empty and unique. The CLI
@@ -100,10 +105,18 @@ fn guard_registry_integrity(all: &[Arc<dyn Provider>]) {
     }
 }
 
+fn unique_provider_ids(ids: &[String]) -> Vec<&str> {
+    let mut seen = HashSet::new();
+    ids.iter()
+        .map(String::as_str)
+        .filter(|id| seen.insert(*id))
+        .collect()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
-    log::set_level(cli.verbose);
+    log::set_level(cli.quiet, cli.verbose);
 
     let registry = providers::all();
     guard_registry_integrity(&registry);
@@ -134,8 +147,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         registry.clone()
     } else {
         let mut out = Vec::new();
-        for want in &cli.providers {
-            match registry.iter().find(|p| p.id() == *want) {
+        for want in unique_provider_ids(&cli.providers) {
+            match registry.iter().find(|p| p.id() == want) {
                 Some(p) => out.push(p.clone()),
                 None => {
                     error("proxplore", format_args!("unknown provider id: {want}"));
@@ -238,4 +251,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_provider_ids;
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn provider_ids_deduplicate_preserving_first_occurrence() {
+        let selected = ids(&["alpha", "beta", "alpha", "gamma", "beta"]);
+
+        assert_eq!(unique_provider_ids(&selected), ["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn unique_provider_ids_pass_through() {
+        let selected = ids(&["gamma", "alpha", "beta"]);
+
+        assert_eq!(unique_provider_ids(&selected), ["gamma", "alpha", "beta"]);
+    }
 }

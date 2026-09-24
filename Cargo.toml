@@ -11,8 +11,11 @@ futures = "0.3"
 
 # HTTP lane: wreq is the curl_cffi equivalent — real Chrome TLS/H2 fingerprints
 # via request-level .emulation(), per-request proxy for rotating gateways.
-wreq = { version = "0.16", features = ["charset", "gzip", "brotli", "zstd"] }
+wreq = { version = "0.16", features = ["charset", "gzip", "brotli", "zstd", "stream"] }
 wreq-util = "0.2"
+# Direct so capped incremental reads retain wreq's charset decoding semantics.
+encoding_rs = "0.8"
+mime = "0.3.17"
 
 # Parsing & normalization
 regex = "1"
