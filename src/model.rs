@@ -54,7 +54,7 @@ impl std::fmt::Display for Scheme {
 }
 
 /// One normalized proxy. `url()` is the deliverable format:
-/// `scheme://[user:pass@]host:port`.
+/// `scheme://[user[:pass]@]host:port`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProxyRecord {
     pub scheme: Scheme,
@@ -68,16 +68,15 @@ pub struct ProxyRecord {
 }
 impl ProxyRecord {
     pub fn url(&self) -> String {
-        match &self.user {
-            Some(u) => format!(
+        match (&self.user, &self.pass) {
+            (Some(user), Some(pass)) => format!(
                 "{}://{}:{}@{}:{}",
-                self.scheme,
-                u,
-                self.pass.as_deref().unwrap_or(""),
-                self.host,
-                self.port
+                self.scheme, user, pass, self.host, self.port
             ),
-            None => format!("{}://{}:{}", self.scheme, self.host, self.port),
+            (Some(user), None) => {
+                format!("{}://{}@{}:{}", self.scheme, user, self.host, self.port)
+            }
+            (None, _) => format!("{}://{}:{}", self.scheme, self.host, self.port),
         }
     }
 }
@@ -178,10 +177,11 @@ pub trait Provider: Send + Sync {
     /// Declarative seed plan; advance() pages each seed to exhaustion.
     fn requests(&self) -> Vec<Request>;
 
-    /// Pagination hook: given the request just fetched and its body, return
-    /// the next request for that feed, or None when exhausted.
-    fn advance(&self, _req: &Request, _body: &str) -> Option<Request> {
-        None
+    /// Pagination hook: return the next request, `Ok(None)` only when the
+    /// authoritative page metadata proves exhaustion, or an error when a
+    /// successful response cannot be decoded as pagination data.
+    fn advance(&self, _req: &Request, _body: &str) -> Result<Option<Request>, String> {
+        Ok(None)
     }
 }
 // Wiring note: `providers::all()` returns `Vec<Arc<dyn Provider>>` directly;

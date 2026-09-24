@@ -48,8 +48,9 @@ impl Provider for Databay {
             })
             .collect()
     }
-    fn advance(&self, req: &Request, body: &str) -> Option<Request> {
-        let url = url::Url::parse(&req.url).ok()?;
+    fn advance(&self, req: &Request, body: &str) -> Result<Option<Request>, String> {
+        let url = url::Url::parse(&req.url)
+            .map_err(|_| "databay pagination parse failed: invalid request URL".to_string())?;
         let (mut proto, mut page): (Option<String>, Option<usize>) = (None, None);
         for (k, v) in url.query_pairs() {
             match &*k {
@@ -58,17 +59,22 @@ impl Provider for Databay {
                 _ => {}
             }
         }
-        let (proto, page) = (proto?, page?);
-        let total = serde_json::from_str::<serde_json::Value>(body)
-            .ok()?
-            .get("total")?
-            .as_u64()? as usize;
+        let proto =
+            proto.ok_or_else(|| "databay pagination parse failed: missing protocol".to_string())?;
+        let page =
+            page.ok_or_else(|| "databay pagination parse failed: invalid page".to_string())?;
+        let value: serde_json::Value = serde_json::from_str(body)
+            .map_err(|error| format!("databay pagination parse failed: {error}"))?;
+        let total = value
+            .get("total")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "databay pagination parse failed: missing total".to_string())?
+            as usize;
         let next = page + 1;
         if page * LIMIT >= total {
-            return None;
+            return Ok(None);
         }
-        let _ = next - 1;
-        Some(
+        Ok(Some(
             Request::new(page_url(&proto, next), format!("{proto} p{next}")).with(
                 PROTOCOLS
                     .iter()
@@ -76,7 +82,7 @@ impl Provider for Databay {
                     .map(|(s, _)| *s),
                 ParseKind::Json,
             ),
-        )
+        ))
     }
 }
 
@@ -93,7 +99,10 @@ mod tests {
         let provider = Databay;
         let first = provider.requests().remove(2);
 
-        let second = provider.advance(&first, r#"{"total":1001}"#).unwrap();
+        let second = provider
+            .advance(&first, r#"{"total":1001}"#)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             second.url,
             "https://databay.com/api/v1/proxy-list?protocol=socks4&limit=1000&page=2&format=json"
@@ -101,6 +110,23 @@ mod tests {
         assert_eq!(second.label, "socks4 p2");
         assert_eq!(second.scheme, Some(Scheme::Socks4));
         assert_eq!(format!("{:?}", second.parser), "json");
-        assert!(provider.advance(&second, r#"{"total":2000}"#).is_none());
+        assert!(matches!(
+            provider.advance(&second, r#"{"total":2000}"#),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn advance_rejects_bad_bodies_without_claiming_exhaustion() {
+        let provider = Databay;
+        let first = provider.requests().remove(2);
+
+        for body in [r#"{"total":"#, r#"{"error":"unavailable"}"#, "{}"] {
+            let error = provider.advance(&first, body).unwrap_err();
+            assert!(
+                error.starts_with("databay pagination parse failed:"),
+                "unexpected error: {error}"
+            );
+        }
     }
 }
