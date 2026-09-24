@@ -38,6 +38,24 @@ pub fn dispatch(
     }
 }
 
+fn page_cap_hit(record_count: usize, cap: usize) -> bool {
+    record_count >= cap
+}
+
+fn advance_result(
+    result: Result<Option<Request>, String>,
+    label: &str,
+) -> (Option<Request>, bool, Option<String>) {
+    match result {
+        Ok(next) => (next, false, None),
+        Err(error) => (
+            None,
+            true,
+            Some(format!("{label}: {error} — truncated, not exhausted")),
+        ),
+    }
+}
+
 async fn drain(
     provider: &dyn Provider,
     fetcher: &Fetcher,
@@ -122,6 +140,7 @@ async fn drain(
                 break;
             }
         };
+        let page_record_count = found.len();
         for rec in &mut found {
             if rec.source.is_empty() {
                 rec.source = id; // shared parsers don't know the provider
@@ -129,13 +148,25 @@ async fn drain(
         }
         proxies.extend(found);
         ok += 1;
-        req = match catch_unwind(AssertUnwindSafe(|| provider.advance(&r, &body))) {
-            Ok(next) => next,
-            Err(_) => {
-                errors.push(format!("{label}: advance panicked"));
-                break;
-            }
+        if page_cap_hit(page_record_count, parse::MAX_PAGE_RECORDS) {
+            truncated = true;
+            errors.push(format!(
+                "{label}: page record cap {} hit — truncated, not exhaustive (possible amplification)",
+                parse::MAX_PAGE_RECORDS
+            ));
+            break;
+        }
+        let next = match catch_unwind(AssertUnwindSafe(|| provider.advance(&r, &body))) {
+            Ok(result) => advance_result(result, &label),
+            Err(_) => (None, false, Some(format!("{label}: advance panicked"))),
         };
+        if next.1 {
+            truncated = true;
+        }
+        if let Some(error) = next.2 {
+            errors.push(error);
+        }
+        req = next.0;
         if let Some(next) = &req {
             let mut set = seen.lock().expect("seen mutex poisoned");
             if !set.insert(next.url.clone()) {
@@ -249,6 +280,7 @@ pub fn dedupe(all: impl IntoIterator<Item = ProxyRecord>) -> Vec<ProxyRecord> {
             .then_with(|| a.host.cmp(&b.host))
             .then_with(|| a.port.cmp(&b.port))
             .then_with(|| a.user.as_deref().cmp(&b.user.as_deref()))
+            .then_with(|| a.pass.as_deref().cmp(&b.pass.as_deref()))
     });
     out
 }
@@ -338,9 +370,12 @@ pub struct ArtifactReport {
     pub proxies_preserved: bool,
     pub harvest_preserved: bool,
 }
-
 /// Writes this run's durable artifacts. An empty harvest never replaces a
-/// last-good proxy or provenance file.
+/// last-good proxy or provenance file. The summary is written last because it
+/// is the commit marker; a summary failure after data lands returns an error
+/// that makes the caller exit 1, so consumers never trust an incomplete
+/// commit. Data artifacts are gated independently, preserving a mismatched
+/// non-empty/empty pair rather than deleting either file.
 pub fn write_artifacts(
     paths: &ArtifactPaths,
     proxies: &[ProxyRecord],
@@ -406,7 +441,12 @@ pub fn write_artifacts(
         Ok(report) => {
             // The summary is the commit marker: an exit or abort before this
             // atomic rename leaves the previous run's self-describing summary.
-            write_atomic(&paths.summary, summary(outcome).to_string().as_bytes())?;
+            if let Err(error) =
+                write_atomic(&paths.summary, summary(outcome).to_string().as_bytes())
+            {
+                eprintln!("artifact commit incomplete — treat this run as failed");
+                return Err(error);
+            }
             Ok(report)
         }
         Err(error) => {
@@ -542,9 +582,9 @@ pub fn write_proxies(path: &Path, proxies: &[ProxyRecord]) -> Result<usize, std:
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactPaths, FetchStop, ProviderRun, ProxyRecord, RunOutcome, Scheme,
+        ArtifactPaths, FetchStop, ProviderRun, ProxyRecord, RunOutcome, Scheme, advance_result,
         compute_interrupted_outcome, compute_run_outcome, dedupe, dedupe_provider_batches,
-        fetch_stop, should_stop, write_artifacts, write_atomic,
+        fetch_stop, page_cap_hit, should_stop, write_artifacts, write_atomic,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::{fs, path::PathBuf};
@@ -815,6 +855,52 @@ mod tests {
     }
 
     #[test]
+    fn dedupe_orders_equal_users_by_password() {
+        let z_password = ProxyRecord {
+            user: Some("alice".into()),
+            pass: Some("z-password".into()),
+            ..record()
+        };
+        let a_password = ProxyRecord {
+            user: Some("alice".into()),
+            pass: Some("a-password".into()),
+            ..record()
+        };
+
+        let records = dedupe([z_password, a_password]);
+
+        assert_eq!(
+            records
+                .into_iter()
+                .map(|record| record.pass.as_deref().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            ["a-password", "z-password"]
+        );
+    }
+
+    #[test]
+    fn page_cap_is_hit_at_the_boundary() {
+        assert!(!page_cap_hit(0, 2));
+        assert!(!page_cap_hit(1, 2));
+        assert!(page_cap_hit(2, 2));
+    }
+
+    #[test]
+    fn advance_errors_are_truncated_while_none_is_exhaustion() {
+        let truncated = advance_result(Err("missing authoritative total".into()), "http p1");
+        assert!(truncated.0.is_none());
+        assert!(truncated.1);
+        assert_eq!(
+            truncated.2.as_deref(),
+            Some("http p1: missing authoritative total — truncated, not exhausted")
+        );
+        let exhausted = advance_result(Ok(None), "http p1");
+        assert!(exhausted.0.is_none());
+        assert!(!exhausted.1);
+        assert!(exhausted.2.is_none());
+    }
+
+    #[test]
     fn failed_provider_keeps_real_identity_in_summary_metadata() {
         let failed = ProviderRun::failed("beta", 1.5, "provider task failed: cancelled");
         let providers = [provider("alpha", 1, vec![]), failed];
@@ -966,6 +1052,36 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn summary_directory_failure_leaves_successful_data_writes_visible() {
+        let dir =
+            std::env::temp_dir().join(format!("proxplore-summary-fail-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let paths = ArtifactPaths::from_output(dir.join("foo.txt").to_str().unwrap());
+        fs::create_dir(&paths.summary).unwrap();
+
+        let result = write_artifacts(
+            &paths,
+            &[record()],
+            &[provider("alpha", 1, vec![])],
+            RunOutcome::Full,
+            42,
+            1.0,
+            1,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(&paths.proxies).unwrap(),
+            "http://proxy.example:8080\n"
+        );
+        let harvest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&paths.harvest).unwrap()).unwrap();
+        assert_eq!(harvest["proxy"], "http://proxy.example:8080");
+        assert_eq!(harvest["run_started_at"], 42);
+        assert!(paths.summary.is_dir());
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn data_write_failure_commits_failed_summary() {
         let dir = std::env::temp_dir().join(format!("proxplore-write-fail-{}", std::process::id()));

@@ -191,15 +191,15 @@ fn valid_hostname(h: &str) -> bool {
         })
 }
 
-fn clean_cred(raw: Option<&str>) -> Option<String> {
-    let v = raw?.trim();
-    if v.is_empty()
-        || v.chars()
-            .any(|c| c.is_whitespace() || c == '@' || c == '/' || c == '\\')
+fn clean_cred(raw: &str) -> Option<String> {
+    if raw.is_empty()
+        || raw.chars().any(|c| {
+            c.is_control() || c.is_whitespace() || matches!(c, '#' | '?' | '%' | '@' | '/' | '\\')
+        })
     {
         return None;
     }
-    Some(v.to_string())
+    Some(raw.to_string())
 }
 
 /// Validate + canonicalize one candidate; None = reject. `port` arrives as
@@ -217,24 +217,30 @@ pub fn make_proxy(
     if port == 0 {
         return None;
     }
-    // Userinfo splits at its first colon, so delimiter characters would make
-    // the rendered credential ambiguous to downstream consumers.
-    if user.is_some_and(|raw| raw.contains(':') || raw.contains('@')) {
+    // Userinfo renders without escaping, so delimiter and URL-significant
+    // characters would change the credential's meaning to consumers.
+    if user.is_some_and(|raw| raw.contains(':')) {
         return None;
     }
-    if pass.is_some_and(|raw| raw.contains('@')) {
+    let user = match user {
+        Some(raw) => Some(clean_cred(raw)?),
+        None => None,
+    };
+    let pass = match pass {
+        Some(raw) => Some(clean_cred(raw)?),
+        None => None,
+    };
+    if pass.is_some() && user.is_none() {
         return None;
     }
-    let user = clean_cred(user);
+    // Absent credentials are structurally distinct from supplied empty ones:
+    // `None` renders a faithful passwordless `user@host`, while `Some("")`
+    // is a malformed line signal and is rejected by clean_cred.
     Some(ProxyRecord {
         scheme,
         host,
         port,
-        pass: if user.is_some() {
-            Some(clean_cred(pass).unwrap_or_default())
-        } else {
-            None
-        },
+        pass,
         user,
         source,
     })
@@ -256,6 +262,7 @@ pub fn make_proxy_from_label(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse::parse_entry_token;
 
     /// Ground truth captured from CPython 3.14's ipaddress module on
     /// 2026-09-12 (`not (is_private | is_reserved | is_loopback |
@@ -344,7 +351,7 @@ mod tests {
     #[test]
     fn credentials_and_ports() {
         let p = make_proxy(Scheme::Http, "8.8.8.8", "80", Some("u"), None, "x").unwrap();
-        assert_eq!(p.url(), "http://u:@8.8.8.8:80");
+        assert_eq!(p.url(), "http://u@8.8.8.8:80");
         assert!(make_proxy(Scheme::Http, "8.8.8.8", "0", None, None, "x").is_none());
         assert!(make_proxy(Scheme::Http, "8.8.8.8", "65536", None, None, "x").is_none());
     }
@@ -388,7 +395,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.url(), "http://u:p:part@8.8.8.8:80");
+
+        for invalid in [" ", "/", "\\", "#", "?", "%", "\n"] {
+            assert!(
+                make_proxy(Scheme::Http, "8.8.8.8", "80", Some(invalid), Some("p"), "x").is_none(),
+                "accepted invalid user {invalid:?}"
+            );
+            assert!(
+                make_proxy(Scheme::Http, "8.8.8.8", "80", Some("u"), Some(invalid), "x").is_none(),
+                "accepted invalid password {invalid:?}"
+            );
+        }
+
+        for invalid in ["\u{80}", "\u{a0}"] {
+            assert!(
+                make_proxy(Scheme::Http, "8.8.8.8", "80", Some(invalid), Some("p"), "x").is_none(),
+                "accepted invalid user {invalid:?}"
+            );
+            assert!(
+                make_proxy(Scheme::Http, "8.8.8.8", "80", Some("u"), Some(invalid), "x").is_none(),
+                "accepted invalid password {invalid:?}"
+            );
+        }
+
+        let clean = make_proxy(Scheme::Http, "8.8.8.8", "80", Some("u"), Some("p"), "x").unwrap();
+        assert_eq!(clean.url(), "http://u:p@8.8.8.8:80");
+        assert!(make_proxy(Scheme::Http, "8.8.8.8", "80", None, Some("p"), "x").is_none());
         let no_auth = make_proxy(Scheme::Http, "8.8.8.8", "80", None, None, "x").unwrap();
         assert_eq!(no_auth.url(), "http://8.8.8.8:80");
+    }
+
+    #[test]
+    fn passwordless_userinfo_is_rendered() {
+        let record = make_proxy(Scheme::Http, "8.8.8.8", "80", Some("u"), None, "x").unwrap();
+        assert_eq!(record.url(), "http://u@8.8.8.8:80");
+        let reparsed = parse_entry_token(&record.url(), None, "x").unwrap();
+        assert_eq!(reparsed.user.as_deref(), Some("u"));
+        assert_eq!(reparsed.pass, None);
+    }
+
+    #[test]
+    fn credentialed_userinfo_round_trips() {
+        let record = make_proxy(Scheme::Http, "8.8.8.8", "80", Some("u"), Some("p"), "x").unwrap();
+        let reparsed = parse_entry_token(&record.url(), None, "x").unwrap();
+        assert_eq!(reparsed.user.as_deref(), Some("u"));
+        assert_eq!(reparsed.pass.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn empty_supplied_password_is_rejected() {
+        assert!(make_proxy(Scheme::Http, "8.8.8.8", "80", Some("u"), Some(""), "x").is_none());
+        assert!(parse_entry_token("u:@8.8.8.8:80", Some(Scheme::Http), "x").is_none());
+    }
+
+    #[test]
+    fn empty_supplied_user_is_rejected() {
+        assert!(make_proxy(Scheme::Http, "8.8.8.8", "80", Some(""), Some("p"), "x").is_none());
     }
 }

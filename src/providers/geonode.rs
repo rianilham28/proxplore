@@ -50,8 +50,9 @@ impl Provider for GeoNode {
             })
             .collect()
     }
-    fn advance(&self, req: &Request, body: &str) -> Option<Request> {
-        let url = url::Url::parse(&req.url).ok()?;
+    fn advance(&self, req: &Request, body: &str) -> Result<Option<Request>, String> {
+        let url = url::Url::parse(&req.url)
+            .map_err(|_| "geonode pagination parse failed: invalid request URL".to_string())?;
         let (mut proto, mut page): (Option<String>, Option<usize>) = (None, None);
         for (k, v) in url.query_pairs() {
             match &*k {
@@ -60,16 +61,22 @@ impl Provider for GeoNode {
                 _ => {}
             }
         }
-        let (proto, page) = (proto?, page?);
-        let total = serde_json::from_str::<serde_json::Value>(body)
-            .ok()?
-            .get("total")?
-            .as_u64()? as usize;
+        let proto =
+            proto.ok_or_else(|| "geonode pagination parse failed: missing protocol".to_string())?;
+        let page =
+            page.ok_or_else(|| "geonode pagination parse failed: invalid page".to_string())?;
+        let value: serde_json::Value = serde_json::from_str(body)
+            .map_err(|error| format!("geonode pagination parse failed: {error}"))?;
+        let total = value
+            .get("total")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "geonode pagination parse failed: missing total".to_string())?
+            as usize;
         let next = page + 1;
         if (next - 1) * PAGE_SIZE >= total {
-            return None;
+            return Ok(None);
         }
-        Some(
+        Ok(Some(
             Request::new(page_url(&proto, next), format!("{proto} p{next}")).with(
                 PROTOCOLS
                     .iter()
@@ -77,7 +84,7 @@ impl Provider for GeoNode {
                     .map(|(s, _)| *s),
                 ParseKind::Json,
             ),
-        )
+        ))
     }
 }
 
@@ -94,7 +101,10 @@ mod tests {
         let provider = GeoNode;
         let first = provider.requests().remove(2);
 
-        let second = provider.advance(&first, r#"{"total":501}"#).unwrap();
+        let second = provider
+            .advance(&first, r#"{"total":501}"#)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             second.url,
             "https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=lastChecked&sort_type=desc&protocols=socks4"
@@ -102,6 +112,23 @@ mod tests {
         assert_eq!(second.label, "socks4 p2");
         assert_eq!(second.scheme, Some(Scheme::Socks4));
         assert_eq!(format!("{:?}", second.parser), "json");
-        assert!(provider.advance(&second, r#"{"total":1000}"#).is_none());
+        assert!(matches!(
+            provider.advance(&second, r#"{"total":1000}"#),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn advance_rejects_bad_bodies_without_claiming_exhaustion() {
+        let provider = GeoNode;
+        let first = provider.requests().remove(2);
+
+        for body in [r#"{"total":"#, r#"{"error":"unavailable"}"#, "{}"] {
+            let error = provider.advance(&first, body).unwrap_err();
+            assert!(
+                error.starts_with("geonode pagination parse failed:"),
+                "unexpected error: {error}"
+            );
+        }
     }
 }

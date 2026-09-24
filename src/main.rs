@@ -70,16 +70,16 @@ struct Cli {
     proxy_url: Option<String>,
 
     /// Parallel HTTP fetches (default: auto-sized from device capacity)
-    #[arg(long)]
+    #[arg(long, value_parser = positive_usize)]
     concurrency: Option<usize>,
 
     /// Per-request read timeout seconds (default: 30)
-    #[arg(long, default_value_t = 30.0)]
+    #[arg(long, default_value_t = 30.0, value_parser = positive_seconds)]
     timeout: f64,
 
     /// Connect timeout seconds (default: 10) — a host that silently drops
     /// SYNs fails here, not on the full read budget
-    #[arg(long, default_value_t = 10.0)]
+    #[arg(long, default_value_t = 10.0, value_parser = positive_seconds)]
     connect_timeout: f64,
 
     /// Debug logging
@@ -89,6 +89,32 @@ struct Cli {
     /// Suppress info logs (--verbose takes precedence if both are set)
     #[arg(short, long)]
     quiet: bool,
+}
+
+fn positive_usize(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| "must be a positive integer".to_string())?;
+    if parsed == 0 {
+        Err("must be at least 1".to_string())
+    } else {
+        Ok(parsed)
+    }
+}
+
+fn positive_seconds(value: &str) -> Result<f64, String> {
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|_| "must be seconds".to_string())?;
+    if parsed.is_finite()
+        && parsed > 0.0
+        && Duration::try_from_secs_f64(parsed)
+            .is_ok_and(|duration| duration >= Duration::from_millis(1))
+    {
+        Ok(parsed)
+    } else {
+        Err("must be a finite duration of at least 0.001 seconds".to_string())
+    }
 }
 
 /// Registry invariant: every provider id is non-empty and unique. The CLI
@@ -422,7 +448,7 @@ fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
 #[cfg(test)]
 mod tests {
 
-    use super::{second_signal_exits, unique_provider_ids};
+    use super::{positive_seconds, positive_usize, second_signal_exits, unique_provider_ids};
 
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -440,6 +466,19 @@ mod tests {
         let selected = ids(&["gamma", "alpha", "beta"]);
 
         assert_eq!(unique_provider_ids(&selected), ["gamma", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn transport_settings_reject_unusable_values() {
+        assert_eq!(positive_usize("1"), Ok(1));
+        assert_eq!(positive_usize("0"), Err("must be at least 1".into()));
+
+        for value in ["0.001", "0.5", "1", "30"] {
+            assert!(positive_seconds(value).is_ok(), "{value}");
+        }
+        for value in ["0", "-1", "NaN", "inf", "1e300", "1e-20", "0.0005"] {
+            assert!(positive_seconds(value).is_err(), "{value}");
+        }
     }
 
     #[test]

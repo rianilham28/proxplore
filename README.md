@@ -1,7 +1,7 @@
 # proxplore
 
 Harvest free HTTP/HTTPS/SOCKS4/SOCKS5 proxies from keyless public sources
-into a deduplicated `proxies.txt` — one `scheme://[user:pass@]host:port` per
+into a deduplicated `proxies.txt` — one `scheme://[user[:pass]@]host:port` per
 line. proxplore **only harvests**: reachability checking, judging and scoring
 are the job of [proxalyze](https://github.com/rianilham28/proxalyze), its
 sibling and downstream consumer.

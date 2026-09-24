@@ -39,7 +39,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use wreq::{Client, Proxy, Response};
 use wreq_util::Emulation;
 
@@ -48,8 +48,9 @@ use crate::log::{debug, warn};
 const RETRY_STATUSES: [u16; 8] = [0, 408, 425, 429, 500, 502, 503, 504]; // 0 = aborted transfer
 const CONNECT_TRIP: u32 = 8; // consecutive connection failures before the host trips
 const PER_HOST_CONCURRENCY: usize = 8; // leaves global capacity for independent hosts
-// Proxy lists are plain text and should be far below 32 MiB. The cap is generous
-// for feeds while preventing a hostile endpoint from exhausting the process.
+// Transport bytes are bounded here; the parser separately bounds record count,
+// so hostile endpoints cannot turn either a response or its decoded page into
+// unbounded memory growth.
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 const CACHE_HOST: &str = "raw.githubusercontent.com";
 const CACHE_FILE: &str = "feed-cache.json";
@@ -57,6 +58,8 @@ const MIN_RETRY_AFTER: Duration = Duration::from_secs(1);
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(120);
 const RATE_LIMIT_FALLBACK: Duration = Duration::from_secs(5);
 const CACHE_FLUSH_DELAY: Duration = Duration::from_millis(250);
+const BAIL_POLL: Duration = Duration::from_millis(250);
+const ADMISSION_BACKOFF: Duration = Duration::from_millis(10);
 
 struct CacheSlot {
     entries: Mutex<HashMap<String, CachedFeed>>,
@@ -124,12 +127,56 @@ struct CachedFeed {
     body: String,
 }
 
-fn is_conn_failure(error: &wreq::Error) -> bool {
-    error.is_connect()
-        || error.is_proxy_connect()
-        || error.is_timeout()
-        || error.is_dns()
-        || error.is_connection_reset()
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TransportSignals {
+    connect: bool,
+    proxy_connect: bool,
+    dns: bool,
+    connection_reset: bool,
+    timeout: bool,
+}
+
+fn retryable(signals: TransportSignals) -> bool {
+    // Every transport error entering the attempt loop keeps the same retry
+    // budget; only connect-phase failure accounting is narrowed.
+    let _timeout = signals.timeout;
+    true
+}
+
+fn trips_breaker(signals: TransportSignals) -> bool {
+    signals.connect || signals.proxy_connect || signals.dns || signals.connection_reset
+}
+
+fn transport_signals(error: &wreq::Error) -> TransportSignals {
+    // Connect timeouts satisfy is_connect; header and body stalls only set
+    // is_timeout, so they remain retryable without being blacklisted.
+    TransportSignals {
+        connect: error.is_connect(),
+        proxy_connect: error.is_proxy_connect(),
+        dns: error.is_dns(),
+        connection_reset: error.is_connection_reset(),
+        timeout: error.is_timeout(),
+    }
+}
+
+fn transport_attempt(error: &wreq::Error, problem: String) -> Attempt {
+    let signals = transport_signals(error);
+    if retryable(signals) {
+        Attempt::Retry {
+            problem,
+            connection_failure: trips_breaker(signals),
+        }
+    } else {
+        Attempt::Permanent
+    }
+}
+
+fn oversize_attempt(url: &str) -> Attempt {
+    warn(
+        "fetch",
+        format_args!("{url} -> response body exceeds {MAX_BODY_BYTES} bytes (skipped)"),
+    );
+    Attempt::Permanent
 }
 
 fn header<'a>(
@@ -296,7 +343,9 @@ fn jittered(delay: Duration) -> Duration {
 }
 
 fn server_retry_wait(server_delay: Duration) -> Duration {
-    server_delay + jittered(server_delay / 2)
+    // The server delay is a floor; jitter spreads the remainder, while the
+    // documented cap is absolute for the total wait.
+    (server_delay + jittered(server_delay / 2)).min(MAX_RETRY_AFTER)
 }
 
 async fn sleep_bounded(wait: Duration, deadline: Option<Instant>, cancelled: &AtomicBool) -> bool {
@@ -321,6 +370,23 @@ async fn sleep_bounded(wait: Duration, deadline: Option<Instant>, cancelled: &At
             slice
         };
         tokio::time::sleep(bounded).await;
+    }
+}
+
+async fn wait_until_bailable(deadline: Option<Instant>, cancelled: &AtomicBool) {
+    loop {
+        if cancelled.load(Ordering::Relaxed)
+            || deadline.is_some_and(|deadline| deadline <= Instant::now())
+        {
+            return;
+        }
+        let slice = match deadline {
+            Some(deadline) => BAIL_POLL
+                .min(deadline.saturating_duration_since(Instant::now()))
+                .max(Duration::from_millis(1)),
+            None => BAIL_POLL,
+        };
+        tokio::time::sleep(slice).await;
     }
 }
 
@@ -462,6 +528,19 @@ fn valid_etag(etag: &str) -> Option<&str> {
     .then_some(etag)
 }
 
+fn admission_bail_reason(
+    deadline: Option<Instant>,
+    cancelled: &AtomicBool,
+) -> Option<&'static str> {
+    if cancelled.load(Ordering::Relaxed) {
+        Some("fetch cancelled")
+    } else if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+        Some("provider deadline reached")
+    } else {
+        None
+    }
+}
+
 pub struct Fetcher {
     client: Client,
     proxy: Option<Proxy>,
@@ -583,10 +662,9 @@ impl Fetcher {
         if let Some(etag) = etag {
             req = req.header("If-None-Match", etag);
         }
-        req.send().await.map_err(|e| Attempt::Retry {
-            problem: format!("{e:?}"),
-            connection_failure: is_conn_failure(&e),
-        })
+        req.send()
+            .await
+            .map_err(|e| transport_attempt(&e, format!("{e:?}")))
     }
 
     async fn handle_response(
@@ -626,14 +704,10 @@ impl Fetcher {
                     problem: "200 but empty body".into(),
                     connection_failure: false,
                 },
-                Err(BodyReadError::Oversize) => Attempt::Retry {
-                    problem: format!("response body exceeds {MAX_BODY_BYTES} bytes"),
-                    connection_failure: false,
-                },
-                Err(BodyReadError::Transport(e)) => Attempt::Retry {
-                    problem: format!("body read failed: {e}"),
-                    connection_failure: is_conn_failure(&e),
-                },
+                Err(BodyReadError::Oversize) => oversize_attempt(url),
+                Err(BodyReadError::Transport(e)) => {
+                    transport_attempt(&e, format!("body read failed: {e}"))
+                }
             };
         }
         if status == 429 {
@@ -652,7 +726,14 @@ impl Fetcher {
         Attempt::Permanent
     }
 
-    async fn once(&self, url: &str, host: &str, headers: &[(String, String)]) -> Attempt {
+    async fn once(
+        &self,
+        url: &str,
+        host: &str,
+        headers: &[(String, String)],
+        deadline: Option<Instant>,
+        cancelled: &AtomicBool,
+    ) -> Option<Attempt> {
         let cached = if host == self.cache_host {
             self.cache_file
                 .as_deref()
@@ -661,36 +742,87 @@ impl Fetcher {
             None
         };
         let cached_entry = cached.as_ref().and_then(|(_, slot)| cache_entry(slot, url));
-        // Global admission happens first; once admitted, a host waiting for
-        // one of its own eight slots temporarily holds a global slot.
-        let _global_permit = self.sem.acquire().await.expect("semaphore closed");
-        let _host_permit = self
-            .host_permit(host)
-            .acquire_owned()
-            .await
-            .expect("host semaphore closed");
-        let path_slot = cached.as_ref().map(|(path, slot)| (slot, *path));
-        match self
-            .send(url, headers, conditional_etag(cached_entry.as_ref()))
-            .await
-        {
-            Ok(resp) => {
-                match self
-                    .handle_response(url, host, path_slot, cached_entry, true, resp)
-                    .await
-                {
-                    Attempt::PlainGet => match self.send(url, headers, None).await {
-                        Ok(resp) => {
-                            self.handle_response(url, host, path_slot, None, false, resp)
-                                .await
-                        }
-                        Err(attempt) => attempt,
-                    },
-                    attempt => attempt,
-                }
+        let host_sem = self.host_permit(host);
+        let (_global_permit, _host_permit): (OwnedSemaphorePermit, OwnedSemaphorePermit) = loop {
+            if let Some(reason) = admission_bail_reason(deadline, cancelled) {
+                debug(
+                    "fetch",
+                    format_args!("{url}: {reason} while awaiting permits"),
+                );
+                return None;
             }
-            Err(attempt) => attempt,
+            let global = tokio::select! {
+                permit = self.sem.clone().acquire_owned() => {
+                    permit.expect("global semaphore closed")
+                },
+                () = wait_until_bailable(deadline, cancelled) => {
+                    let reason = admission_bail_reason(deadline, cancelled)
+                        .unwrap_or("admission interrupted");
+                    debug("fetch", format_args!("{url}: {reason} while awaiting permits"));
+                    return None;
+                },
+            };
+            // The host permit is only tried, never awaited, while global is
+            // held: dual-hold blocking is therefore impossible and lock order
+            // cannot form a cross-host cycle.
+            match host_sem.clone().try_acquire_owned() {
+                Ok(host) => break (global, host),
+                Err(tokio::sync::TryAcquireError::Closed) => {
+                    debug("fetch", format_args!("{url}: host semaphore closed"));
+                    return None;
+                }
+                Err(tokio::sync::TryAcquireError::NoPermits) => {}
+            }
+            drop(global);
+            tokio::select! {
+                () = tokio::time::sleep(ADMISSION_BACKOFF) => {}
+                () = wait_until_bailable(deadline, cancelled) => {
+                    let reason = admission_bail_reason(deadline, cancelled)
+                        .unwrap_or("admission interrupted");
+                    debug("fetch", format_args!("{url}: {reason} while awaiting permits"));
+                    return None;
+                },
+            }
+        };
+        // Last gate before each send; expiry within nanoseconds of this check
+        // may still send — accepted.
+        if let Some(reason) = admission_bail_reason(deadline, cancelled) {
+            debug(
+                "fetch",
+                format_args!("{url}: {reason} after permit admission"),
+            );
+            return None;
         }
+        let path_slot = cached.as_ref().map(|(path, slot)| (slot, *path));
+        Some(
+            match self
+                .send(url, headers, conditional_etag(cached_entry.as_ref()))
+                .await
+            {
+                Ok(resp) => {
+                    match self
+                        .handle_response(url, host, path_slot, cached_entry, true, resp)
+                        .await
+                    {
+                        Attempt::PlainGet => {
+                            if let Some(reason) = admission_bail_reason(deadline, cancelled) {
+                                debug("fetch", format_args!("{url}: {reason} before plain GET"));
+                                return None;
+                            }
+                            match self.send(url, headers, None).await {
+                                Ok(resp) => {
+                                    self.handle_response(url, host, path_slot, None, false, resp)
+                                        .await
+                                }
+                                Err(attempt) => attempt,
+                            }
+                        }
+                        attempt => attempt,
+                    }
+                }
+                Err(attempt) => attempt,
+            },
+        )
     }
 
     /// Returns body text, or None on failure (already logged).
@@ -729,7 +861,7 @@ impl Fetcher {
                 break;
             }
             attempt += 1;
-            match self.once(url, &host, headers).await {
+            match self.once(url, &host, headers, deadline, cancelled).await? {
                 Attempt::Ok(body) => {
                     self.note_success(&host);
                     return Some(body);
@@ -935,13 +1067,109 @@ mod tests {
     }
 
     #[test]
-    fn server_retry_jitter_preserves_server_floor() {
-        let delay = Duration::from_secs(60);
+    fn server_retry_jitter_preserves_floor_and_absolute_cap() {
         for _ in 0..1_000 {
-            let actual = server_retry_wait(delay);
-            assert!(actual >= delay);
-            assert!(actual <= delay + delay / 2);
+            let sixty = server_retry_wait(Duration::from_secs(60));
+            assert!((Duration::from_secs(60)..=Duration::from_secs(120)).contains(&sixty));
+            assert_eq!(server_retry_wait(MAX_RETRY_AFTER), MAX_RETRY_AFTER);
         }
+    }
+
+    #[test]
+    fn transport_signals_separate_read_timeouts_from_connection_trips() {
+        let read_timeout = TransportSignals {
+            timeout: true,
+            ..TransportSignals::default()
+        };
+        assert!(retryable(read_timeout));
+        assert!(!trips_breaker(read_timeout));
+
+        let connect = TransportSignals {
+            connect: true,
+            timeout: true,
+            ..TransportSignals::default()
+        };
+        assert!(retryable(connect));
+        assert!(trips_breaker(connect));
+    }
+
+    #[test]
+    fn oversize_response_is_permanent() {
+        assert!(matches!(
+            oversize_attempt("http://example.test"),
+            Attempt::Permanent
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_deadline_bails_before_sending() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (accepted_sender, accepted_receiver) = oneshot::channel();
+        let probe = tokio::spawn(async move {
+            let accepted = listener.accept().await;
+            let _ = accepted_sender.send(accepted.is_ok());
+        });
+
+        let result = test_fetcher()
+            .get(
+                &format!("http://{address}/not-sent"),
+                &[],
+                Some(Instant::now()),
+                &AtomicBool::new(false),
+            )
+            .await;
+
+        assert_eq!(result, None);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), accepted_receiver)
+                .await
+                .is_err()
+        );
+        probe.abort();
+    }
+
+    #[tokio::test]
+    async fn queued_request_bails_at_deadline_without_sending() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (accepted_sender, accepted_receiver) = oneshot::channel();
+        let probe = tokio::spawn(async move {
+            let accepted = listener.accept().await;
+            let _ = accepted_sender.send(accepted.is_ok());
+        });
+        let mut fetcher = Fetcher::new(FetchConfig {
+            concurrency: 1,
+            timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(2),
+            proxy_url: None,
+        })
+        .unwrap();
+        fetcher.retries = 0;
+        fetcher.rate_limit_retries = 0;
+        let held = fetcher.sem.acquire().await.unwrap();
+        let started = Instant::now();
+        let deadline = Instant::now() + Duration::from_millis(30);
+
+        let result = fetcher
+            .get(
+                &format!("http://{address}/not-sent"),
+                &[],
+                Some(deadline),
+                &AtomicBool::new(false),
+            )
+            .await;
+
+        assert_eq!(result, None);
+        assert!(Instant::now() >= deadline);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), accepted_receiver)
+                .await
+                .is_err()
+        );
+        probe.abort();
+        drop(held);
     }
 
     #[tokio::test]
