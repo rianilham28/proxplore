@@ -26,20 +26,25 @@ mod runner;
 use std::collections::HashSet;
 use std::error::Error;
 use std::io::Write;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use tokio::task::JoinSet;
+use futures::FutureExt;
+use tokio::task::JoinHandle;
 
 use fetch::{FetchConfig, Fetcher};
 use log::{error, info, warn};
-use model::{Provider, ScrapeOutcome};
+use model::Provider;
 
 #[derive(Parser)]
 #[command(name = "proxplore", version, about, long_about = None)]
 struct Cli {
-    /// Output file (default: proxies.txt)
+    /// Proxy output. Writes derived provenance and summary artifacts beside
+    /// it; a provenance name that would collide gets a suffix instead.
+    /// Harvest exit status: 0 full, 1 failed, 2 partial (usage and
+    /// provider-selection errors also exit nonzero).
     #[arg(short, long, default_value = "proxies.txt")]
     output: String,
 
@@ -187,74 +192,168 @@ async fn main() -> Result<(), Box<dyn Error>> {
         proxy_url: cli.proxy_url.clone(),
     })?);
 
+    let started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let run_started = Instant::now();
     info(
         "proxplore",
         format_args!("scraping {} provider(s)…", selected.len()),
     );
-    let mut set = JoinSet::new();
-    for provider in selected {
-        let fetcher = fetcher.clone();
-        set.spawn(async move { runner::scrape(provider, fetcher).await });
-    }
-    let mut outcomes: Vec<ScrapeOutcome> = Vec::new();
-    while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok(o) => {
+    let handles: Vec<(&'static str, JoinHandle<_>, Instant)> = selected
+        .into_iter()
+        .map(|provider| {
+            let provider_id = provider.id();
+            let fetcher = fetcher.clone();
+            let spawn_started = Instant::now();
+            let handle = tokio::spawn(async move {
+                let started = Instant::now();
+                let result = AssertUnwindSafe(runner::scrape(provider, fetcher))
+                    .catch_unwind()
+                    .await;
+                (provider_id, started.elapsed().as_secs_f64(), result)
+            });
+            (provider_id, handle, spawn_started)
+        })
+        .collect();
+    let mut provider_runs = Vec::new();
+    let mut record_batches = Vec::new();
+    let mut task_failures = 0usize;
+    for (provider_id, handle, spawn_started) in handles {
+        match handle.await {
+            Ok((_, duration, Ok((outcome, truncated)))) => {
                 info(
                     "proxplore",
                     format_args!(
-                        "done {:<20} requests {}/{} proxies={}",
-                        o.provider_id,
-                        o.requests_ok,
-                        o.requests_total,
-                        o.proxies.len()
+                        "done {:<20} requests {}/{} proxies={} ({duration:.1}s)",
+                        provider_id,
+                        outcome.requests_ok,
+                        outcome.requests_total,
+                        outcome.proxies.len()
                     ),
                 );
-                outcomes.push(o);
+                provider_runs.push(runner::ProviderRun::from_outcome(
+                    &outcome, duration, truncated,
+                ));
+                record_batches.push((provider_runs.len() - 1, outcome.proxies));
             }
-            Err(e) => error("proxplore", format_args!("provider task failed: {e}")),
+            Ok((_, duration, Err(panic))) => {
+                task_failures += 1;
+                let reason = panic_message(&panic);
+                error(
+                    provider_id,
+                    format_args!("provider task panicked: {reason}"),
+                );
+                provider_runs.push(runner::ProviderRun::failed(provider_id, duration, &reason));
+                record_batches.push((provider_runs.len() - 1, Vec::new()));
+            }
+            Err(e) => {
+                task_failures += 1;
+                error(provider_id, format_args!("provider task failed: {e}"));
+                // Cancellation is observed only after earlier handles, so this
+                // is a spawn-to-observation upper bound rather than execution time.
+                provider_runs.push(runner::ProviderRun::failed(
+                    provider_id,
+                    spawn_started.elapsed().as_secs_f64(),
+                    &e.to_string(),
+                ));
+                record_batches.push((provider_runs.len() - 1, Vec::new()));
+            }
         }
     }
 
-    for o in &outcomes {
+    provider_runs.sort_by_key(|provider| provider.provider_id);
+
+    for provider in &provider_runs {
         // a tripped-host fan-out produces one chain-stop per page; echo a
         // few and count the rest — the fetcher already logged the cause once
-        for err in o.errors.iter().take(3) {
-            warn(o.provider_id, format_args!("  {err}"));
+        for err in provider.errors.iter().take(3) {
+            warn(provider.provider_id, format_args!("  {err}"));
         }
-        if let Some(more) = o.errors.len().checked_sub(3) {
+        if let Some(more) = provider.errors.len().checked_sub(3) {
             warn(
-                o.provider_id,
+                provider.provider_id,
                 format_args!("  … +{more} further per-page errors (same cause)"),
             );
         }
     }
-    let merged = runner::dedupe(outcomes.into_iter().flat_map(|o| o.proxies));
+    let records_total: usize = record_batches
+        .iter()
+        .map(|(_, records)| records.len())
+        .sum();
+    let merged = runner::dedupe_provider_batches(record_batches);
     info(
         "proxplore",
         format_args!("unique after cross-provider dedupe: {}", merged.len()),
     );
 
-    let written = runner::write_proxies(&cli.output, &merged)?;
+    let outcome =
+        runner::compute_run_outcome(&provider_runs, records_total, merged.len(), task_failures);
+    let paths = runner::ArtifactPaths::from_output(&cli.output);
+    let report = runner::write_artifacts(
+        &paths,
+        &merged,
+        &provider_runs,
+        outcome,
+        started_at,
+        run_started.elapsed().as_secs_f64(),
+        records_total,
+    )?;
+
     let mut counts: [usize; 4] = [0; 4];
-    for p in &merged {
-        counts[p.scheme as usize] += 1;
+    for proxy in &merged {
+        counts[proxy.scheme as usize] += 1;
     }
     info(
         "proxplore",
         format_args!(
-            "wrote {written} proxies -> {}  [http={}  https={}  socks4={}  socks5={}]",
-            cli.output, counts[0], counts[1], counts[2], counts[3]
+            "{} {} proxies -> {}  [http={}  https={}  socks4={}  socks5={}]",
+            if report.proxies_preserved {
+                "kept last-good"
+            } else {
+                "wrote"
+            },
+            merged.len(),
+            cli.output,
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[3]
         ),
     );
-    if written == 0 {
-        std::process::exit(1);
+    if outcome == runner::RunOutcome::Failed {
+        warn(
+            "proxplore",
+            format_args!(
+                "harvest produced no records; proxies {}, provenance {}",
+                if report.proxies_preserved {
+                    "preserved existing"
+                } else {
+                    "wrote empty"
+                },
+                if report.harvest_preserved {
+                    "preserved existing"
+                } else {
+                    "wrote empty"
+                },
+            ),
+        );
     }
-    Ok(())
+    std::process::exit(outcome.exit_code());
+}
+
+fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic payload".into())
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::unique_provider_ids;
 
     fn ids(values: &[&str]) -> Vec<String> {
