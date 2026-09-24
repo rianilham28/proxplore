@@ -6,7 +6,7 @@ rust-version = "1.98"
 description = "Harvest free HTTP/HTTPS/SOCKS4/SOCKS5 proxies from keyless public sources into a deduplicated proxies.txt"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal"] }
 futures = "0.3"
 
 # HTTP lane: wreq is the curl_cffi equivalent — real Chrome TLS/H2 fingerprints

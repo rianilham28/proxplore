@@ -13,6 +13,7 @@ use std::fs;
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -42,6 +43,7 @@ async fn drain(
     fetcher: &Fetcher,
     seed: Request,
     seen: Arc<Mutex<HashSet<String>>>,
+    cancelled: &AtomicBool,
 ) -> (Vec<ProxyRecord>, Vec<String>, usize, usize, bool) {
     let id = provider.id();
     let mut proxies = Vec::new();
@@ -52,6 +54,14 @@ async fn drain(
     let deadline = Instant::now() + provider.time_budget();
 
     while let Some(r) = req {
+        if should_stop(cancelled.load(Ordering::Relaxed)) {
+            truncated = true;
+            errors.push(format!(
+                "{}: harvest interrupted — chain stopped before starting another request",
+                r.label
+            ));
+            break;
+        }
         if made >= provider.max_requests() {
             truncated = true;
             errors.push(format!(
@@ -113,7 +123,15 @@ async fn drain(
     (proxies, errors, ok, made, truncated)
 }
 
-pub async fn scrape(provider: Arc<dyn Provider>, fetcher: Arc<Fetcher>) -> (ScrapeOutcome, bool) {
+fn should_stop(cancelled: bool) -> bool {
+    cancelled
+}
+
+pub async fn scrape(
+    provider: Arc<dyn Provider>,
+    fetcher: Arc<Fetcher>,
+    cancelled: Arc<AtomicBool>,
+) -> (ScrapeOutcome, bool) {
     let id = provider.id();
     let mut outcome = ScrapeOutcome {
         provider_id: id,
@@ -137,8 +155,13 @@ pub async fn scrape(provider: Arc<dyn Provider>, fetcher: Arc<Fetcher>) -> (Scra
             .collect::<HashSet<String>>(),
     ));
     let chains = join_all(seeds.into_iter().map(|seed| {
-        let (provider, fetcher, seen) = (provider.clone(), fetcher.clone(), seen.clone());
-        async move { drain(provider.as_ref(), &fetcher, seed, seen).await }
+        let (provider, fetcher, seen, cancelled) = (
+            provider.clone(),
+            fetcher.clone(),
+            seen.clone(),
+            cancelled.clone(),
+        );
+        async move { drain(provider.as_ref(), &fetcher, seed, seen, cancelled.as_ref()).await }
     }))
     .await;
     let mut truncated = false;
@@ -150,6 +173,18 @@ pub async fn scrape(provider: Arc<dyn Provider>, fetcher: Arc<Fetcher>) -> (Scra
         truncated |= chain_truncated;
     }
     (outcome, truncated)
+}
+
+/// A signal is not itself incomplete data: provider state decides whether
+/// work was actually cut short, while the existing classifier preserves
+/// failure and completeness semantics.
+pub fn compute_interrupted_outcome(
+    providers: &[ProviderRun],
+    records_total: usize,
+    records_unique: usize,
+    task_failures: usize,
+) -> RunOutcome {
+    compute_run_outcome(providers, records_total, records_unique, task_failures)
 }
 
 /// First occurrence wins; sorted by scheme, then host, port, credentials.
@@ -449,9 +484,10 @@ pub fn write_proxies(path: &Path, proxies: &[ProxyRecord]) -> Result<usize, std:
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactPaths, ProviderRun, ProxyRecord, RunOutcome, Scheme, compute_run_outcome,
-        dedupe_provider_batches, write_artifacts, write_atomic,
+        ArtifactPaths, ProviderRun, ProxyRecord, RunOutcome, Scheme, compute_interrupted_outcome,
+        compute_run_outcome, dedupe_provider_batches, should_stop, write_artifacts, write_atomic,
     };
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::{fs, path::PathBuf};
 
     fn provider(id: &'static str, ok: usize, errors: Vec<&str>) -> ProviderRun {
@@ -464,6 +500,43 @@ mod tests {
             truncated: false,
             errors: errors.into_iter().map(str::to_owned).collect(),
         }
+    }
+
+    #[test]
+    fn cancellation_decision_follows_only_the_flag() {
+        let cancelled = AtomicBool::new(false);
+        assert!(!should_stop(cancelled.load(Ordering::Relaxed)));
+
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(should_stop(cancelled.load(Ordering::Relaxed)));
+    }
+
+    #[test]
+    fn interrupted_cut_short_is_partial_with_exit_two() {
+        let mut providers = [provider("alpha", 1, vec![])];
+        providers[0].truncated = true;
+        let outcome = compute_interrupted_outcome(&providers, 1, 1, 0);
+
+        assert_eq!(outcome, RunOutcome::Partial);
+        assert_eq!(outcome.exit_code(), 2);
+    }
+
+    #[test]
+    fn interrupted_after_complete_chains_is_full_with_exit_zero() {
+        let providers = [provider("alpha", 1, vec![])];
+        let outcome = compute_interrupted_outcome(&providers, 1, 1, 0);
+
+        assert_eq!(outcome, RunOutcome::Full);
+        assert_eq!(outcome.exit_code(), 0);
+    }
+
+    #[test]
+    fn interrupted_empty_harvest_fails_with_exit_one() {
+        let providers = [provider("alpha", 0, vec![])];
+        let outcome = compute_interrupted_outcome(&providers, 0, 0, 0);
+
+        assert_eq!(outcome, RunOutcome::Failed);
+        assert_eq!(outcome.exit_code(), 1);
     }
 
     #[test]
