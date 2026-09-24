@@ -372,38 +372,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
     for proxy in &merged {
         counts[proxy.scheme as usize] += 1;
     }
-    info(
-        "proxplore",
-        format_args!(
-            "{} {} proxies -> {}  [http={}  https={}  socks4={}  socks5={}]",
-            if report.proxies_preserved {
-                "kept last-good"
-            } else {
-                "wrote"
-            },
-            merged.len(),
-            cli.output,
-            counts[0],
-            counts[1],
-            counts[2],
-            counts[3]
-        ),
-    );
     if outcome == runner::RunOutcome::Failed {
-        warn(
+        if report.proxies_preserved {
+            warn(
+                "proxplore",
+                format_args!(
+                    "harvest produced no new records; kept existing {} unchanged",
+                    cli.output
+                ),
+            );
+        } else {
+            warn(
+                "proxplore",
+                format_args!(
+                    "harvest produced no new records; wrote empty {}",
+                    cli.output
+                ),
+            );
+        }
+    } else {
+        info(
             "proxplore",
             format_args!(
-                "harvest produced no records; proxies {}, provenance {}",
-                if report.proxies_preserved {
-                    "preserved existing"
-                } else {
-                    "wrote empty"
-                },
-                if report.harvest_preserved {
-                    "preserved existing"
-                } else {
-                    "wrote empty"
-                },
+                "wrote {} proxies -> {}  [http={}  https={}  socks4={}  socks5={}]",
+                merged.len(),
+                cli.output,
+                counts[0],
+                counts[1],
+                counts[2],
+                counts[3]
             ),
         );
     }
