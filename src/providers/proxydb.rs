@@ -88,3 +88,27 @@ impl Provider for Proxydb {
 pub fn new() -> Arc<dyn Provider> {
     Arc::new(Proxydb)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_rows_uses_href_port_instead_of_decoy_cell_text() {
+        let body = concat!(
+            "<table><tr><th>IP</th><th>Port</th></tr>",
+            "<tr><td>8.8.8.8</td><td><div style=\"display:none\">12</div><a>80</a></td>",
+            "<td><a href=\"/8.8.8.8/8080#https\">details</a></td></tr>",
+            "<tr><td>1.1.1.1</td><td><div style=\"display:none\">99</div><a>90</a></td>",
+            "<td><a href=\"/1.1.1.1/3128#http\">details</a></td></tr></table>"
+        );
+
+        assert_eq!(
+            parse_rows(body, Some(Scheme::Http))
+                .into_iter()
+                .map(|record| record.url())
+                .collect::<Vec<_>>(),
+            ["https://8.8.8.8:8080", "http://1.1.1.1:3128"]
+        );
+    }
+}

@@ -485,7 +485,8 @@ pub fn write_proxies(path: &Path, proxies: &[ProxyRecord]) -> Result<usize, std:
 mod tests {
     use super::{
         ArtifactPaths, ProviderRun, ProxyRecord, RunOutcome, Scheme, compute_interrupted_outcome,
-        compute_run_outcome, dedupe_provider_batches, should_stop, write_artifacts, write_atomic,
+        compute_run_outcome, dedupe, dedupe_provider_batches, should_stop, write_artifacts,
+        write_atomic,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::{fs, path::PathBuf};
@@ -660,6 +661,84 @@ mod tests {
         };
         assert_eq!(bytes(&first), bytes(&second));
         assert_eq!(first[0].source, "alpha");
+    }
+
+    #[test]
+    fn dedupe_preserves_first_source_for_cross_provider_and_within_provider_duplicates() {
+        let first = ProxyRecord {
+            source: "alpha",
+            ..record()
+        };
+        let cross_provider = ProxyRecord {
+            source: "beta",
+            ..record()
+        };
+        let within_provider = ProxyRecord {
+            source: "gamma",
+            host: "other.example".into(),
+            ..record()
+        };
+        let records = dedupe([
+            first.clone(),
+            cross_provider,
+            within_provider.clone(),
+            within_provider,
+            first.clone(),
+        ]);
+
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().any(|item| item == &first));
+        assert!(!records.iter().any(|item| item.source == "beta"));
+    }
+
+    #[test]
+    fn dedupe_sorts_by_scheme_host_and_port() {
+        let mut socks = record();
+        socks.scheme = Scheme::Socks5;
+        socks.host = "z.example".into();
+        socks.port = 1080;
+        let http_high = ProxyRecord {
+            port: 9000,
+            ..record()
+        };
+        let http_low = ProxyRecord {
+            host: "a.example".into(),
+            port: 80,
+            ..record()
+        };
+        let same_host_low_port = ProxyRecord {
+            port: 8080,
+            ..record()
+        };
+
+        let records = dedupe([socks, http_high, same_host_low_port, http_low]);
+
+        assert_eq!(
+            records
+                .into_iter()
+                .map(|record| record.url())
+                .collect::<Vec<_>>(),
+            [
+                "http://a.example:80",
+                "http://proxy.example:8080",
+                "http://proxy.example:9000",
+                "socks5://z.example:1080"
+            ]
+        );
+    }
+
+    #[test]
+    fn dedupe_keeps_authenticated_and_unauthenticated_proxies_distinct() {
+        let unauthenticated = record();
+        let authenticated = ProxyRecord {
+            user: Some("alice".into()),
+            pass: Some("secret".into()),
+            ..record()
+        };
+
+        let records = dedupe([authenticated.clone(), unauthenticated.clone()]);
+        assert_eq!(records[0], unauthenticated);
+        assert_eq!(records[1], authenticated);
     }
 
     #[test]

@@ -83,3 +83,24 @@ impl Provider for Databay {
 pub fn new() -> Arc<dyn Provider> {
     Arc::new(Databay)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advance_continues_before_total_and_stops_on_last_page() {
+        let provider = Databay;
+        let first = provider.requests().remove(2);
+
+        let second = provider.advance(&first, r#"{"total":1001}"#).unwrap();
+        assert_eq!(
+            second.url,
+            "https://databay.com/api/v1/proxy-list?protocol=socks4&limit=1000&page=2&format=json"
+        );
+        assert_eq!(second.label, "socks4 p2");
+        assert_eq!(second.scheme, Some(Scheme::Socks4));
+        assert_eq!(format!("{:?}", second.parser), "json");
+        assert!(provider.advance(&second, r#"{"total":2000}"#).is_none());
+    }
+}

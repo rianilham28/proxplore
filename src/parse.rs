@@ -231,9 +231,112 @@ pub fn ndjson(body: &str, default: Option<Scheme>, source: &'static str) -> Vec<
 /// Dispatch on payload shape: JSON document -> records, else lines. Covers
 /// providers whose endpoint flavor changes without warning.
 pub fn auto(body: &str, default: Option<Scheme>, source: &'static str) -> Vec<ProxyRecord> {
-    if matches!(body.trim_start().chars().next(), Some('[') | Some('{')) {
+    if body.trim_start().starts_with('{') {
+        if serde_json::from_str::<Value>(body).is_ok() {
+            json(body, default, source)
+        } else {
+            ndjson(body, default, source)
+        }
+    } else if body.trim_start().starts_with('[') {
         json(body, default, source)
     } else {
         entries(body, default, source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn urls(records: Vec<ProxyRecord>) -> Vec<String> {
+        records.into_iter().map(|record| record.url()).collect()
+    }
+
+    #[test]
+    fn entries_extracts_valid_tokens_from_mixed_line_list() {
+        let body = "# feed header\n  8.8.8.8:8080  \n\nnot a proxy\nhttps://1.1.1.1:3128\r\n# trailing comment";
+
+        assert_eq!(
+            urls(entries(body, Some(Scheme::Http), "fixture")),
+            ["http://8.8.8.8:8080", "https://1.1.1.1:3128"]
+        );
+    }
+
+    #[test]
+    fn json_reads_array_and_known_envelopes() {
+        let array = json(
+            r#"[{"ip":"8.8.8.8","port":8080},{"host":"1.1.1.1","port":"3128"}]"#,
+            Some(Scheme::Socks4),
+            "fixture",
+        );
+        let envelope = json(
+            r#"{"data":[{"ip":"9.9.9.9","port":1080,"protocol":"socks5"}]}"#,
+            None,
+            "fixture",
+        );
+
+        assert_eq!(
+            urls(array),
+            ["socks4://8.8.8.8:8080", "socks4://1.1.1.1:3128"]
+        );
+        assert_eq!(urls(envelope), ["socks5://9.9.9.9:1080"]);
+    }
+
+    #[test]
+    fn json_returns_no_records_for_wrong_root_or_missing_records() {
+        let wrong_root = json(r#"{"data":"8.8.8.8:8080"}"#, Some(Scheme::Http), "fixture");
+        let missing_records = json(r#"{"total":0}"#, Some(Scheme::Http), "fixture");
+
+        assert!(wrong_root.is_empty());
+        assert!(missing_records.is_empty());
+    }
+
+    #[test]
+    fn ndjson_skips_malformed_lines_and_accepts_trailing_newline() {
+        let body = concat!(
+            "{\"ip\":\"8.8.8.8\",\"port\":8080,\"protocol\":\"http\"}\n",
+            "{not json}\n",
+            "{\"host\":\"1.1.1.1\",\"port\":3128,\"type\":\"https\"}\n"
+        );
+
+        assert_eq!(
+            urls(ndjson(body, None, "fixture")),
+            ["http://8.8.8.8:8080", "https://1.1.1.1:3128"]
+        );
+    }
+
+    #[test]
+    fn auto_routes_array_json_and_plain_lines_by_first_content() {
+        let json_body = r#"[{"ip":"8.8.8.8","port":8080,"protocol":"http"}]"#;
+        let line_body = "1.1.1.1:3128\n9.9.9.9:1080";
+
+        assert_eq!(
+            urls(auto(json_body, None, "fixture")),
+            ["http://8.8.8.8:8080"]
+        );
+        assert_eq!(
+            urls(auto(line_body, Some(Scheme::Socks5), "fixture")),
+            ["socks5://1.1.1.1:3128", "socks5://9.9.9.9:1080"]
+        );
+    }
+
+    #[test]
+    fn auto_distinguishes_json_ndjson_and_pretty_printed_json() {
+        let one_record = r#"{"ip":"8.8.8.8","port":8080,"protocol":"http"}"#;
+        let ndjson_body = format!("{one_record}\n{one_record}");
+        let pretty_json = r#"{
+  "data": [
+    {"ip": "1.1.1.1", "port": 3128, "protocol": "https"}
+  ]
+}"#;
+
+        assert_eq!(
+            urls(auto(&ndjson_body, None, "fixture")),
+            ["http://8.8.8.8:8080", "http://8.8.8.8:8080"]
+        );
+        assert_eq!(
+            urls(auto(pretty_json, None, "fixture")),
+            ["https://1.1.1.1:3128"]
+        );
     }
 }

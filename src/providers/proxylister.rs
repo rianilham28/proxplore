@@ -64,3 +64,24 @@ impl Provider for Proxylister {
 pub fn new() -> Arc<dyn Provider> {
     Arc::new(Proxylister)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advance_continues_before_count_and_stops_on_last_page() {
+        let provider = Proxylister;
+        let first = provider.requests().remove(0);
+
+        let second = provider.advance(&first, r#"{"count":501}"#).unwrap();
+        assert_eq!(
+            second.url,
+            "https://proxylister.com/api/v1/proxies?limit=500&page=2&sort=-last_checked_at"
+        );
+        assert_eq!(second.label, "p2");
+        assert_eq!(second.scheme, None);
+        assert_eq!(format!("{:?}", second.parser), "json");
+        assert!(provider.advance(&second, r#"{"count":1000}"#).is_none());
+    }
+}

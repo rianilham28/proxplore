@@ -86,3 +86,28 @@ impl Provider for E89ip {
 pub fn new() -> Arc<dyn Provider> {
     Arc::new(E89ip)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_rows_extracts_first_layui_table_and_skips_garbage() {
+        let body = concat!(
+            "<table class=\"layui-table\"><tbody>",
+            "<tr><td>\n 8.8.8.8 \n</td><td>\t8080\t</td></tr>",
+            "<tr><td>not-an-ip</td><td>garbage</td></tr>",
+            "<tr><td>1.1.1.1</td><td>3128</td></tr>",
+            "</tbody></table>",
+            "<table class=\"layui-table\"><tr><td>9.9.9.9</td><td>1080</td></tr></table>"
+        );
+
+        assert_eq!(
+            parse_rows(body, Some(Scheme::Http))
+                .into_iter()
+                .map(|record| record.url())
+                .collect::<Vec<_>>(),
+            ["http://8.8.8.8:8080", "http://1.1.1.1:3128"]
+        );
+    }
+}
