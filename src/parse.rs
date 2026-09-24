@@ -157,7 +157,10 @@ fn endpoint_without_userinfo(raw: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Borrowed(raw)
 }
 
-fn declared_schemes(obj: &serde_json::Map<String, Value>, default: Option<Scheme>) -> Vec<Scheme> {
+fn declared_schemes(
+    obj: &serde_json::Map<String, Value>,
+    default: Option<Scheme>,
+) -> (Vec<Scheme>, bool) {
     let mut declared: Vec<Scheme> = ["protocols", "schemes"]
         .iter()
         .find_map(|key| obj.get(*key).and_then(Value::as_array))
@@ -175,12 +178,13 @@ fn declared_schemes(obj: &serde_json::Map<String, Value>, default: Option<Scheme
             .take(1)
             .collect();
     }
+    let declared_present = !declared.is_empty();
     if declared.is_empty() {
         declared = default.into_iter().collect();
     }
     declared.sort();
     declared.dedup();
-    declared
+    (declared, declared_present)
 }
 
 /// One JSON record (or embedded entry string) -> zero or more proxies.
@@ -222,7 +226,7 @@ pub fn record_proxies(
             } else {
                 std::borrow::Cow::Borrowed(host)
             };
-            let schemes = declared_schemes(obj, default);
+            let (schemes, declared_present) = declared_schemes(obj, default);
             let scheme_self_describing = endpoint.contains("://");
             let self_describing = scheme_self_describing || endpoint.contains(']');
             let has_separate_port = matches!(
@@ -240,7 +244,10 @@ pub fn record_proxies(
                         return false;
                     }
                     endpoint_accepted = true;
-                    if !self_describing && let Some(scheme) = attempt {
+                    if declared_present
+                        && !self_describing
+                        && let Some(scheme) = attempt
+                    {
                         parsed.scheme = scheme;
                     }
                     let record = if dedicated_auth {
@@ -630,16 +637,43 @@ mod tests {
         );
         let labeled_protocols = json(
             r#"{"ip":"1.2.3.4:8080:http","protocols":["http","socks5"]}"#,
-            None,
+            Some(Scheme::Http),
             "fixture",
         );
         assert_eq!(urls(full_ipv6), ["http://[2a01:4f8::1]:8080"]);
+
+        let token_label = json(
+            r#"{"ip":"1.2.3.4:1080:socks5"}"#,
+            Some(Scheme::Http),
+            "fixture",
+        );
+        let default_only = json(r#"{"ip":"1.2.3.4:1080"}"#, Some(Scheme::Http), "fixture");
+        assert_eq!(urls(token_label), ["socks5://1.2.3.4:1080"]);
+        assert_eq!(urls(default_only), ["http://1.2.3.4:1080"]);
 
         let bracketed_port = json(
             r#"{"ip":"[2a01:4f8::1]:8080","port":9999}"#,
             Some(Scheme::Http),
             "fixture",
         );
+        let empty_protocols = json(
+            r#"{"ip":"1.2.3.4:1080:socks5","protocols":[]}"#,
+            Some(Scheme::Http),
+            "fixture",
+        );
+        let bogus_protocols = json(
+            r#"{"ip":"1.2.3.4:1080:socks5","protocols":["bogus"]}"#,
+            Some(Scheme::Http),
+            "fixture",
+        );
+        let null_protocol = json(
+            r#"{"ip":"1.2.3.4:1080:socks5","protocol":null}"#,
+            Some(Scheme::Http),
+            "fixture",
+        );
+        assert_eq!(urls(empty_protocols), ["socks5://1.2.3.4:1080"]);
+        assert_eq!(urls(bogus_protocols), ["socks5://1.2.3.4:1080"]);
+        assert_eq!(urls(null_protocol), ["socks5://1.2.3.4:1080"]);
 
         let unschemed_protocols = json(
             r#"{"ip":"1.2.3.4:8080","protocols":["http","socks5"]}"#,

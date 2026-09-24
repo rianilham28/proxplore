@@ -56,6 +56,11 @@ fn advance_result(
     }
 }
 
+fn advance_panic_result(label: &str) -> (Option<Request>, bool, Option<String>) {
+    // A panic stops before exhaustion just like malformed pagination metadata.
+    (None, true, Some(format!("{label}: advance panicked")))
+}
+
 async fn drain(
     provider: &dyn Provider,
     fetcher: &Fetcher,
@@ -158,7 +163,7 @@ async fn drain(
         }
         let next = match catch_unwind(AssertUnwindSafe(|| provider.advance(&r, &body))) {
             Ok(result) => advance_result(result, &label),
-            Err(_) => (None, false, Some(format!("{label}: advance panicked"))),
+            Err(_) => advance_panic_result(&label),
         };
         if next.1 {
             truncated = true;
@@ -582,9 +587,10 @@ pub fn write_proxies(path: &Path, proxies: &[ProxyRecord]) -> Result<usize, std:
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactPaths, FetchStop, ProviderRun, ProxyRecord, RunOutcome, Scheme, advance_result,
-        compute_interrupted_outcome, compute_run_outcome, dedupe, dedupe_provider_batches,
-        fetch_stop, page_cap_hit, should_stop, write_artifacts, write_atomic,
+        ArtifactPaths, FetchStop, ProviderRun, ProxyRecord, RunOutcome, Scheme,
+        advance_panic_result, advance_result, compute_interrupted_outcome, compute_run_outcome,
+        dedupe, dedupe_provider_batches, fetch_stop, page_cap_hit, should_stop, write_artifacts,
+        write_atomic,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::{fs, path::PathBuf};
@@ -898,6 +904,14 @@ mod tests {
         assert!(exhausted.0.is_none());
         assert!(!exhausted.1);
         assert!(exhausted.2.is_none());
+    }
+
+    #[test]
+    fn advance_panic_is_truncated_even_with_no_next_request() {
+        let panicked = advance_panic_result("http p1");
+        assert!(panicked.0.is_none());
+        assert!(panicked.1);
+        assert_eq!(panicked.2.as_deref(), Some("http p1: advance panicked"));
     }
 
     #[test]
