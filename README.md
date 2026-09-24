@@ -57,10 +57,20 @@ Rust counterpart of curl_cffi's `impersonate`.
 
 ## CI / consumer contract
 
-- `ci.yml`: fmt + clippy `-D warnings` + `cargo test` + release-build,
-  ubuntu/macos.
+- `ci.yml`: fmt + clippy `-D warnings`, locked tests and release builds on
+  ubuntu/macos, plus `cargo check --locked` on Rust 1.98.0 (MSRV) and a
+  cargo-audit dependency check.
 - `release.yml`: tag `v*` → linux-gnu x86_64/aarch64 + separate macOS
   x86_64/aarch64 archives, sha256'd, attached to the GitHub Release.
+- Every harvest emits the requested proxy pool plus provenance at
+  `<stem>.jsonl` and run metadata at `<stem>.summary.json` (names that would
+  collide with the proxy output receive a disambiguating suffix). Provenance
+  rows share the run's `run_started_at` timestamp. The summary is written last
+  as the commit marker: a data-write failure records `failed`/exit 1 when it
+  can, while an earlier abort leaves the previous run's dated summary intact.
+- Exit status is 0 for a full harvest, 1 for failure, 2 for partial data, and
+  130 for abort by a second Ctrl-C. Usage and provider-selection errors also
+  exit nonzero.
 - proxalyze's nightly pool refresh checks this repo out and runs
   `cargo build --release --locked --bin proxplore` — keep `Cargo.lock`
   committed and the binary name stable.

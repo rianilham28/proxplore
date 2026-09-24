@@ -34,9 +34,9 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use tokio::sync::Semaphore;
@@ -56,6 +56,27 @@ const CACHE_FILE: &str = "feed-cache.json";
 const MIN_RETRY_AFTER: Duration = Duration::from_secs(1);
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(120);
 const RATE_LIMIT_FALLBACK: Duration = Duration::from_secs(5);
+const CACHE_FLUSH_DELAY: Duration = Duration::from_millis(250);
+
+struct CacheSlot {
+    entries: Mutex<HashMap<String, CachedFeed>>,
+    flush_pending: AtomicBool,
+}
+
+impl CacheSlot {
+    fn new(path: &std::path::Path) -> Self {
+        Self {
+            entries: Mutex::new(read_cache(path).unwrap_or_default()),
+            flush_pending: AtomicBool::new(false),
+        }
+    }
+}
+
+// Each configured path gets one slot, so provider Fetcher clones share both
+// the lazy disk load and future in-process updates.
+type CacheSlotCell = Arc<std::sync::OnceLock<Arc<CacheSlot>>>;
+static CACHE_SLOTS: LazyLock<Mutex<HashMap<std::path::PathBuf, CacheSlotCell>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static CACHE_IO: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Outcome of one attempt.
@@ -274,6 +295,35 @@ fn jittered(delay: Duration) -> Duration {
     delay.mul_f64(0.5 + 0.5 * (next_jitter_bits() >> 11) as f64 / ((1_u64 << 53) as f64))
 }
 
+fn server_retry_wait(server_delay: Duration) -> Duration {
+    server_delay + jittered(server_delay / 2)
+}
+
+async fn sleep_bounded(wait: Duration, deadline: Option<Instant>, cancelled: &AtomicBool) -> bool {
+    let started = Instant::now();
+    loop {
+        if cancelled.load(Ordering::Relaxed) {
+            return false;
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= wait {
+            return deadline.is_none_or(|deadline| deadline > Instant::now());
+        }
+        let slice = (wait - elapsed).min(Duration::from_millis(250));
+        let bounded = if let Some(deadline) = deadline {
+            let remaining = deadline.checked_duration_since(Instant::now());
+            match remaining {
+                Some(remaining) if remaining.is_zero() => return false,
+                Some(remaining) => slice.min(remaining),
+                None => return false,
+            }
+        } else {
+            slice
+        };
+        tokio::time::sleep(bounded).await;
+    }
+}
+
 fn cache_path() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|home| {
         std::path::Path::new(&home)
@@ -308,26 +358,21 @@ fn read_cache(path: &std::path::Path) -> Option<HashMap<String, CachedFeed>> {
     )
 }
 
-fn write_cache(path: &std::path::Path, url: &str, etag: &str, body: &str) -> std::io::Result<()> {
+fn write_cache_entries(
+    path: &std::path::Path,
+    entries: &HashMap<String, CachedFeed>,
+) -> std::io::Result<()> {
     // Cache writes are best effort. Cross-process last-writer-wins may lose
     // one entry, which only makes the next run pay for a plain GET.
     let _guard = CACHE_IO
         .lock()
         .map_err(|_| std::io::Error::other("feed cache lock poisoned"))?;
-    let mut entries = read_cache(path).unwrap_or_default();
-    entries.insert(
-        url.to_string(),
-        CachedFeed {
-            etag: etag.to_string(),
-            body: body.to_string(),
-        },
-    );
     let value = serde_json::Value::Object(
         entries
-            .into_iter()
+            .iter()
             .map(|(url, cached)| {
                 (
-                    url,
+                    url.clone(),
                     serde_json::json!({ "etag": cached.etag, "body": cached.body }),
                 )
             })
@@ -350,8 +395,56 @@ fn write_cache(path: &std::path::Path, url: &str, etag: &str, body: &str) -> std
     Ok(())
 }
 
-fn cache_entry(entries: Option<HashMap<String, CachedFeed>>, url: &str) -> Option<CachedFeed> {
-    entries.and_then(|entries| entries.get(url).cloned())
+fn cache_slot(path: &std::path::Path) -> Arc<CacheSlot> {
+    let slot_cell = {
+        CACHE_SLOTS
+            .lock()
+            .expect("cache slot map poisoned")
+            .entry(path.to_path_buf())
+            .or_default()
+            .clone()
+    };
+    Arc::clone(slot_cell.get_or_init(|| Arc::new(CacheSlot::new(path))))
+}
+
+fn cache_entry(slot: &CacheSlot, url: &str) -> Option<CachedFeed> {
+    slot.entries
+        .lock()
+        .expect("feed cache poisoned")
+        .get(url)
+        .cloned()
+}
+
+fn update_cache(slot: &Arc<CacheSlot>, path: &std::path::Path, url: &str, etag: &str, body: &str) {
+    let should_flush = {
+        slot.entries.lock().expect("feed cache poisoned").insert(
+            url.to_string(),
+            CachedFeed {
+                etag: etag.to_string(),
+                body: body.to_string(),
+            },
+        );
+        !slot.flush_pending.swap(true, Ordering::AcqRel)
+    };
+    if should_flush {
+        schedule_cache_flush(Arc::clone(slot), path.to_path_buf());
+    }
+}
+
+fn schedule_cache_flush(slot: Arc<CacheSlot>, path: std::path::PathBuf) {
+    std::thread::spawn(move || {
+        std::thread::sleep(CACHE_FLUSH_DELAY);
+        if !slot.flush_pending.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let entries = slot.entries.lock().expect("feed cache poisoned").clone();
+        if let Err(e) = write_cache_entries(&path, &entries) {
+            debug("fetch", format_args!("feed cache flush failed: {e}"));
+        }
+        if slot.flush_pending.load(Ordering::Acquire) {
+            schedule_cache_flush(slot, path);
+        }
+    });
 }
 
 fn conditional_etag(entry: Option<&CachedFeed>) -> Option<&str> {
@@ -500,7 +593,7 @@ impl Fetcher {
         &self,
         url: &str,
         host: &str,
-        cached: Option<&std::path::Path>,
+        cache: Option<(&Arc<CacheSlot>, &std::path::Path)>,
         cached_entry: Option<CachedFeed>,
         allow_plain_fallback: bool,
         resp: Response,
@@ -524,10 +617,8 @@ impl Fetcher {
             let etag = header(resp.headers(), &wreq::header::ETAG).map(str::to_string);
             return match read_body(resp).await {
                 Ok(body) if !body.trim().is_empty() => {
-                    if let (Some(path), Some(etag)) = (cached, etag)
-                        && let Err(e) = write_cache(path, url, &etag, &body)
-                    {
-                        debug("fetch", format_args!("{url}: feed cache write failed: {e}"));
+                    if let (Some((slot, path)), Some(etag)) = (cache, etag) {
+                        update_cache(slot, path, url, &etag, &body);
                     }
                     Attempt::Ok(body)
                 }
@@ -562,6 +653,14 @@ impl Fetcher {
     }
 
     async fn once(&self, url: &str, host: &str, headers: &[(String, String)]) -> Attempt {
+        let cached = if host == self.cache_host {
+            self.cache_file
+                .as_deref()
+                .map(|path| (path, cache_slot(path)))
+        } else {
+            None
+        };
+        let cached_entry = cached.as_ref().and_then(|(_, slot)| cache_entry(slot, url));
         // Global admission happens first; once admitted, a host waiting for
         // one of its own eight slots temporarily holds a global slot.
         let _global_permit = self.sem.acquire().await.expect("semaphore closed");
@@ -570,33 +669,19 @@ impl Fetcher {
             .acquire_owned()
             .await
             .expect("host semaphore closed");
-        let cached = if host == self.cache_host {
-            self.cache_file.clone()
-        } else {
-            None
-        };
-        let cached_entry = cached.as_deref().and_then(|path| {
-            let entry = cache_entry(read_cache(path), url);
-            if entry.is_none() && path.exists() {
-                debug(
-                    "fetch",
-                    format_args!("{url}: feed cache unreadable or corrupt; using plain GET"),
-                );
-            }
-            entry
-        });
+        let path_slot = cached.as_ref().map(|(path, slot)| (slot, *path));
         match self
             .send(url, headers, conditional_etag(cached_entry.as_ref()))
             .await
         {
             Ok(resp) => {
                 match self
-                    .handle_response(url, host, cached.as_deref(), cached_entry, true, resp)
+                    .handle_response(url, host, path_slot, cached_entry, true, resp)
                     .await
                 {
                     Attempt::PlainGet => match self.send(url, headers, None).await {
                         Ok(resp) => {
-                            self.handle_response(url, host, cached.as_deref(), None, false, resp)
+                            self.handle_response(url, host, path_slot, None, false, resp)
                                 .await
                         }
                         Err(attempt) => attempt,
@@ -609,7 +694,16 @@ impl Fetcher {
     }
 
     /// Returns body text, or None on failure (already logged).
-    pub async fn get(&self, url: &str, headers: &[(String, String)]) -> Option<String> {
+    pub async fn get(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        deadline: Option<Instant>,
+        cancelled: &AtomicBool,
+    ) -> Option<String> {
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
         let host = Self::host_of(url);
         if self.is_tripped(&host) {
             debug(
@@ -622,6 +716,14 @@ impl Fetcher {
         let mut rate_hits = 0usize;
         let mut problem: String;
         loop {
+            if cancelled.load(Ordering::Relaxed) {
+                problem = "fetch cancelled".into();
+                break;
+            }
+            if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+                problem = "provider deadline reached".into();
+                break;
+            }
             attempt += 1;
             match self.once(url, &host, headers).await {
                 Attempt::Ok(body) => {
@@ -643,12 +745,19 @@ impl Fetcher {
                         problem = "HTTP 429".into();
                         break;
                     }
-                    let wait = jittered(server_delay);
+                    let wait = server_retry_wait(server_delay);
                     debug(
                         "fetch",
-                        format_args!("{url} rate-limited, waiting {wait:?}"),
+                        format_args!("{url} rate-limited, waiting up to {wait:?}"),
                     );
-                    tokio::time::sleep(wait).await; // outside both permits
+                    if !sleep_bounded(wait, deadline, cancelled).await {
+                        problem = if cancelled.load(Ordering::Relaxed) {
+                            "HTTP 429; fetch cancelled".into()
+                        } else {
+                            "HTTP 429; provider deadline reached".into()
+                        };
+                        break;
+                    }
                     continue;
                 }
                 Attempt::Retry {
@@ -671,7 +780,10 @@ impl Fetcher {
                 break;
             }
             let wait = jittered(Duration::from_secs_f64(1.5 * attempt as f64));
-            tokio::time::sleep(wait).await; // outside both permits
+            if !sleep_bounded(wait, deadline, cancelled).await {
+                problem.push_str("; provider deadline reached");
+                break;
+            }
         }
         warn(
             "fetch",
@@ -815,6 +927,32 @@ mod tests {
     }
 
     #[test]
+    fn server_retry_jitter_preserves_server_floor() {
+        let delay = Duration::from_secs(60);
+        for _ in 0..1_000 {
+            let actual = server_retry_wait(delay);
+            assert!(actual >= delay);
+            assert!(actual <= delay + delay / 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_sleep_is_bounded_cancellable_and_past_deadline_is_immediate() {
+        let started = Instant::now();
+        let cancelled = AtomicBool::new(false);
+        assert!(!sleep_bounded(Duration::from_secs(60), Some(Instant::now()), &cancelled).await);
+        assert!(started.elapsed() < Duration::from_millis(100));
+
+        let deadline = Instant::now() + Duration::from_millis(20);
+        assert!(!sleep_bounded(Duration::from_secs(60), Some(deadline), &cancelled).await);
+        assert!(Instant::now() >= deadline);
+
+        let cancelled = AtomicBool::new(true);
+        assert!(!sleep_bounded(Duration::from_secs(60), None, &cancelled).await);
+        assert!(Instant::now() < started + Duration::from_millis(500));
+    }
+
+    #[test]
     fn declared_length_decision_rejects_only_oversize() {
         assert!(!declared_length_oversize(Some(
             &(MAX_BODY_BYTES as u64).to_string()
@@ -839,7 +977,9 @@ mod tests {
             etag: "\"abc\"".into(),
             body: "1.2.3.4:80".into(),
         };
-        write_cache(&path, url, &cached.etag, &cached.body).unwrap();
+        let mut entries = HashMap::new();
+        entries.insert(url.to_string(), cached.clone());
+        write_cache_entries(&path, &entries).unwrap();
         assert_eq!(read_cache(&path).unwrap().get(url), Some(&cached));
         let _ = fs::remove_dir_all(dir);
     }
@@ -853,15 +993,48 @@ mod tests {
         ));
         let target = dir.join(CACHE_FILE);
         fs::create_dir_all(&target).unwrap();
-        let result = write_cache(
+        let result = write_cache_entries(
             &target,
-            "https://example.test/feed",
-            "\"abc\"",
-            "1.2.3.4:80",
+            &HashMap::from([(
+                "https://example.test/feed".to_string(),
+                CachedFeed {
+                    etag: "\"abc\"".into(),
+                    body: "1.2.3.4:80".into(),
+                },
+            )]),
         );
         assert!(result.is_err());
         let temp = target.with_extension(format!("tmp-{}", std::process::id()));
         assert!(!temp.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cache_lookups_continue_after_file_deletion() {
+        let (dir, path) = test_cache_path("memory");
+        let url = "https://raw.githubusercontent.com/example/main/proxies.txt";
+        let cached = CachedFeed {
+            etag: "\"cached-v1\"".into(),
+            body: "1.2.3.4:8080".into(),
+        };
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                url: { "etag": cached.etag, "body": cached.body }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let slot = cache_slot(&path);
+        assert_eq!(cache_entry(&slot, url), Some(cached));
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            cache_entry(&slot, url),
+            Some(CachedFeed {
+                etag: "\"cached-v1\"".into(),
+                body: "1.2.3.4:8080".into(),
+            })
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -904,8 +1077,9 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-            assert!(cache_entry(read_cache(&path), url).is_none());
-            assert!(conditional_etag(cache_entry(read_cache(&path), url).as_ref()).is_none());
+            let loaded = read_cache(&path).unwrap_or_default();
+            assert!(!loaded.contains_key(url));
+            assert!(conditional_etag(loaded.get(url)).is_none());
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -928,8 +1102,9 @@ mod tests {
             let _ = stream.write_all(b"\r\n0\r\n\r\n").await;
         });
 
+        let cancelled = AtomicBool::new(false);
         let body = test_fetcher()
-            .get(&format!("http://{address}/large"), &[])
+            .get(&format!("http://{address}/large"), &[], None, &cancelled)
             .await;
 
         assert_eq!(body, None);
@@ -975,7 +1150,7 @@ mod tests {
         fetcher.cache_host = cache_host;
         fetcher.cache_file = Some(path);
 
-        let body = fetcher.get(&url, &[]).await;
+        let body = fetcher.get(&url, &[], None, &AtomicBool::new(false)).await;
         let request = request_receiver.await.unwrap();
         server.await.unwrap();
 
@@ -1033,7 +1208,7 @@ mod tests {
             } else {
                 format!("http://{address}/error/{index}")
             };
-            tokio::spawn(async move { fetcher.get(&url, &[]).await })
+            tokio::spawn(async move { fetcher.get(&url, &[], None, &AtomicBool::new(false)).await })
         });
         let results = futures::future::join_all(requests)
             .await

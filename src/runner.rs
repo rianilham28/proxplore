@@ -86,7 +86,10 @@ async fn drain(
         } else {
             r.label.clone()
         };
-        let Some(body) = fetcher.get(&r.url, &r.headers).await else {
+        let Some(body) = fetcher
+            .get(&r.url, &r.headers, Some(deadline), cancelled)
+            .await
+        else {
             errors.push(format!("{label}: fetch failed — chain stopped"));
             break;
         };
@@ -301,7 +304,7 @@ pub struct ArtifactReport {
 }
 
 /// Writes this run's durable artifacts. An empty harvest never replaces a
-/// last-good proxy or provenance file, but its summary is always current.
+/// last-good proxy or provenance file.
 pub fn write_artifacts(
     paths: &ArtifactPaths,
     proxies: &[ProxyRecord],
@@ -311,56 +314,75 @@ pub fn write_artifacts(
     duration_secs: f64,
     records_total: usize,
 ) -> Result<ArtifactReport, std::io::Error> {
-    let provider_values: Vec<_> = providers
-        .iter()
-        .map(|provider| {
-            serde_json::json!({
-                "id": provider.provider_id,
-                "ok_requests": provider.ok_requests,
-                "total_requests": provider.total_requests,
-                "records": provider.records,
-                "duration_secs": provider.duration_secs,
-                "truncated": provider.truncated,
-                "errors": provider.errors,
+    let summary = |outcome: RunOutcome| {
+        let provider_values: Vec<_> = providers
+            .iter()
+            .map(|provider| {
+                serde_json::json!({
+                    "id": provider.provider_id,
+                    "ok_requests": provider.ok_requests,
+                    "total_requests": provider.total_requests,
+                    "records": provider.records,
+                    "duration_secs": provider.duration_secs,
+                    "truncated": provider.truncated,
+                    "errors": provider.errors,
+                })
             })
+            .collect();
+        serde_json::json!({
+            "started_at": started_at,
+            "duration_secs": duration_secs,
+            "outcome": outcome.label(),
+            "exit_code": outcome.exit_code(),
+            "records_total": records_total,
+            "records_unique": proxies.len(),
+            "providers": provider_values,
         })
-        .collect();
-    let summary = serde_json::json!({
-        "started_at": started_at,
-        "duration_secs": duration_secs,
-        "outcome": outcome.label(),
-        "exit_code": outcome.exit_code(),
-        "records_total": records_total,
-        "records_unique": proxies.len(),
-        "providers": provider_values,
-    });
-    // exit_code classifies the harvest itself. The process may still fail later
-    // when a data artifact cannot be written, so this summary is committed first.
-    write_atomic(&paths.summary, summary.to_string().as_bytes())?;
+    };
 
-    let failed = outcome == RunOutcome::Failed;
-    let preserve_proxies = failed && has_contents(&paths.proxies);
-    let preserve_harvest = failed && has_contents(&paths.harvest);
-    if !preserve_proxies {
-        write_proxies(&paths.proxies, proxies)?;
-    }
-    if !preserve_harvest {
-        let mut harvest = Vec::new();
-        for record in proxies {
-            let value = serde_json::json!({
-                "proxy": record.url(),
-                "source": record.source,
-                "fetched_at": started_at,
-            });
-            harvest.extend_from_slice(&value.to_string().into_bytes());
-            harvest.push(b'\n');
+    let write_data = || -> Result<ArtifactReport, std::io::Error> {
+        let failed = outcome == RunOutcome::Failed;
+        let proxies_preserved = failed && has_contents(&paths.proxies);
+        let harvest_preserved = failed && has_contents(&paths.harvest);
+        if !proxies_preserved {
+            write_proxies(&paths.proxies, proxies)?;
         }
-        write_atomic(&paths.harvest, &harvest)?;
+        if !harvest_preserved {
+            let mut harvest = Vec::new();
+            for record in proxies {
+                let value = serde_json::json!({
+                    "proxy": record.url(),
+                    "source": record.source,
+                    "run_started_at": started_at,
+                });
+                harvest.extend_from_slice(&value.to_string().into_bytes());
+                harvest.push(b'\n');
+            }
+            write_atomic(&paths.harvest, &harvest)?;
+        }
+        Ok(ArtifactReport {
+            proxies_preserved,
+            harvest_preserved,
+        })
+    };
+
+    match write_data() {
+        Ok(report) => {
+            // The summary is the commit marker: an exit or abort before this
+            // atomic rename leaves the previous run's self-describing summary.
+            write_atomic(&paths.summary, summary(outcome).to_string().as_bytes())?;
+            Ok(report)
+        }
+        Err(error) => {
+            // Best effort preserves a truthful failure marker; if this write
+            // also fails, the prior run's clearly dated summary remains.
+            let _ = write_atomic(
+                &paths.summary,
+                summary(RunOutcome::Failed).to_string().as_bytes(),
+            );
+            Err(error)
+        }
     }
-    Ok(ArtifactReport {
-        proxies_preserved: preserve_proxies,
-        harvest_preserved: preserve_harvest,
-    })
 }
 
 #[derive(Clone, Debug)]
@@ -664,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn dedupe_preserves_first_source_for_cross_provider_and_within_provider_duplicates() {
+    fn dedupe_preserves_first_source_and_collapses_same_provider_duplicates() {
         let first = ProxyRecord {
             source: "alpha",
             ..record()
@@ -885,11 +907,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(harvest["source"], "alpha");
-        assert_eq!(harvest["fetched_at"], 123);
+        assert_eq!(harvest["run_started_at"], 123);
         let summary: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&paths.summary).unwrap()).unwrap();
         assert_eq!(summary["providers"][0]["duration_secs"], 1.25);
         assert_eq!(summary["exit_code"], 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn data_write_failure_commits_failed_summary() {
+        let dir = std::env::temp_dir().join(format!("proxplore-write-fail-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let paths = ArtifactPaths::from_output(dir.join("foo.txt").to_str().unwrap());
+        fs::create_dir(&paths.proxies).unwrap();
+        fs::write(
+            &paths.summary,
+            serde_json::json!({"started_at": 7, "outcome": "full", "exit_code": 0}).to_string(),
+        )
+        .unwrap();
+
+        assert!(
+            write_artifacts(
+                &paths,
+                &[record()],
+                &[provider("alpha", 1, vec![])],
+                RunOutcome::Full,
+                42,
+                1.0,
+                1,
+            )
+            .is_err()
+        );
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&paths.summary).unwrap()).unwrap();
+        assert_eq!(summary["started_at"], 42);
+        assert_eq!(summary["outcome"], "failed");
+        assert_eq!(summary["exit_code"], 1);
         fs::remove_dir_all(dir).unwrap();
     }
 }
