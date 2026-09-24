@@ -28,6 +28,7 @@ use std::error::Error;
 use std::io::Write;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -37,14 +38,18 @@ use tokio::task::JoinHandle;
 use fetch::{FetchConfig, Fetcher};
 use log::{error, info, warn};
 use model::Provider;
+#[cfg(not(unix))]
+use tokio::signal::ctrl_c;
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
 
 #[derive(Parser)]
 #[command(name = "proxplore", version, about, long_about = None)]
 struct Cli {
     /// Proxy output. Writes derived provenance and summary artifacts beside
     /// it; a provenance name that would collide gets a suffix instead.
-    /// Harvest exit status: 0 full, 1 failed, 2 partial (usage and
-    /// provider-selection errors also exit nonzero).
+    /// Harvest exit status: 0 full, 1 failed, 2 partial, 130 aborted by
+    /// second Ctrl-C (usage and provider-selection errors also exit nonzero).
     #[arg(short, long, default_value = "proxies.txt")]
     output: String,
 
@@ -201,15 +206,56 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "proxplore",
         format_args!("scraping {} provider(s)…", selected.len()),
     );
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let signal_state = cancelled.clone();
+    let finalizing = Arc::new(AtomicBool::new(false));
+    let signal_finalizing = finalizing.clone();
+    #[cfg(unix)]
+    let mut interrupt = match signal(SignalKind::interrupt()) {
+        Ok(signal) => signal,
+        Err(err) => {
+            error(
+                "proxplore",
+                format_args!("failed to listen for SIGINT: {err}"),
+            );
+            std::process::exit(1);
+        }
+    };
+    let _signal_task = tokio::spawn(async move {
+        #[cfg(unix)]
+        if interrupt.recv().await.is_none() {
+            return;
+        }
+        // Every release target is Unix; this fallback exists only for
+        // cross-platform builds, where the between-receiver race is accepted.
+        #[cfg(not(unix))]
+        if ctrl_c().await.is_err() {
+            error("proxplore", format_args!("failed to listen for SIGINT"));
+            return;
+        }
+        signal_state.store(true, Ordering::Relaxed);
+        warn(
+            "proxplore",
+            format_args!("SIGINT received — draining in-flight requests, Ctrl-C again to abort"),
+        );
+        #[cfg(unix)]
+        interrupt.recv().await;
+        #[cfg(not(unix))]
+        let _ = ctrl_c().await;
+        if second_signal_exits(signal_finalizing.load(Ordering::SeqCst)) {
+            std::process::exit(130);
+        }
+    });
     let handles: Vec<(&'static str, JoinHandle<_>, Instant)> = selected
         .into_iter()
         .map(|provider| {
             let provider_id = provider.id();
             let fetcher = fetcher.clone();
+            let cancelled = cancelled.clone();
             let spawn_started = Instant::now();
             let handle = tokio::spawn(async move {
                 let started = Instant::now();
-                let result = AssertUnwindSafe(runner::scrape(provider, fetcher))
+                let result = AssertUnwindSafe(runner::scrape(provider, fetcher, cancelled))
                     .catch_unwind()
                     .await;
                 (provider_id, started.elapsed().as_secs_f64(), result)
@@ -221,7 +267,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut record_batches = Vec::new();
     let mut task_failures = 0usize;
     for (provider_id, handle, spawn_started) in handles {
-        match handle.await {
+        let result = handle.await;
+        match result {
             Ok((_, duration, Ok((outcome, truncated)))) => {
                 info(
                     "proxplore",
@@ -262,6 +309,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+    // The listener intentionally outlives the drain so it keeps the second
+    // Ctrl-C armed through artifact writes; it is processed as soon as a
+    // runtime worker is free (best-effort during blocking filesystem I/O).
 
     provider_runs.sort_by_key(|provider| provider.provider_id);
 
@@ -288,8 +338,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         format_args!("unique after cross-provider dedupe: {}", merged.len()),
     );
 
-    let outcome =
-        runner::compute_run_outcome(&provider_runs, records_total, merged.len(), task_failures);
+    let interrupted = cancelled.load(Ordering::Relaxed);
+    let outcome = if interrupted {
+        runner::compute_interrupted_outcome(
+            &provider_runs,
+            records_total,
+            merged.len(),
+            task_failures,
+        )
+    } else {
+        runner::compute_run_outcome(&provider_runs, records_total, merged.len(), task_failures)
+    };
+    if interrupted && outcome == runner::RunOutcome::Full {
+        info(
+            "proxplore",
+            format_args!("SIGINT observed after all providers completed — harvest is complete"),
+        );
+    }
     let paths = runner::ArtifactPaths::from_output(&cli.output);
     let report = runner::write_artifacts(
         &paths,
@@ -300,6 +365,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         run_started.elapsed().as_secs_f64(),
         records_total,
     )?;
+    // Once artifacts are durable, the harvest outcome must win over a late abort.
+    finalizing.store(true, Ordering::SeqCst);
 
     let mut counts: [usize; 4] = [0; 4];
     for proxy in &merged {
@@ -343,6 +410,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     std::process::exit(outcome.exit_code());
 }
 
+fn second_signal_exits(finalizing: bool) -> bool {
+    !finalizing
+}
+
 fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
     panic
         .downcast_ref::<&str>()
@@ -354,7 +425,7 @@ fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
 #[cfg(test)]
 mod tests {
 
-    use super::unique_provider_ids;
+    use super::{second_signal_exits, unique_provider_ids};
 
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -372,5 +443,11 @@ mod tests {
         let selected = ids(&["gamma", "alpha", "beta"]);
 
         assert_eq!(unique_provider_ids(&selected), ["gamma", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn second_signal_aborts_unless_artifacts_are_final() {
+        assert!(second_signal_exits(false));
+        assert!(!second_signal_exits(true));
     }
 }
