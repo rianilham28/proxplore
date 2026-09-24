@@ -77,3 +77,25 @@ impl Provider for AdvancedName {
 pub fn new() -> Arc<dyn Provider> {
     Arc::new(AdvancedName)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_attrs_decodes_unpadded_base64_within_each_row() {
+        let body = concat!(
+            "<tr><td data-ip=\"OC44LjguOA==\"></td><td data-port=\"ODA4MA==\"></td></tr>",
+            "<tr><td data-ip=\"OS4yLjguOA==\"></td><td></td></tr>",
+            "<tr><td data-ip=\"MS4xLjEuMQ==\"></td><td data-port=\"NDQz\"></td></tr></table>",
+        );
+
+        assert_eq!(
+            parse_attrs(body, Some(Scheme::Socks5))
+                .into_iter()
+                .map(|record| record.url())
+                .collect::<Vec<_>>(),
+            ["socks5://8.8.8.8:8080", "socks5://1.1.1.1:443"]
+        );
+    }
+}
