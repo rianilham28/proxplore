@@ -26,7 +26,7 @@ pub fn info(target: &str, args: std::fmt::Arguments<'_>) {
     if enabled(LEVEL_INFO) {
         eprintln!(
             "{}",
-            format_line('I', std::time::SystemTime::now(), target, &args)
+            format_line('I', std::time::SystemTime::now(), target, args)
         );
     }
 }
@@ -34,14 +34,14 @@ pub fn info(target: &str, args: std::fmt::Arguments<'_>) {
 pub fn warn(target: &str, args: std::fmt::Arguments<'_>) {
     eprintln!(
         "{}",
-        format_line('W', std::time::SystemTime::now(), target, &args)
+        format_line('W', std::time::SystemTime::now(), target, args)
     );
 }
 
 pub fn error(target: &str, args: std::fmt::Arguments<'_>) {
     eprintln!(
         "{}",
-        format_line('E', std::time::SystemTime::now(), target, &args)
+        format_line('E', std::time::SystemTime::now(), target, args)
     );
 }
 
@@ -49,7 +49,7 @@ pub fn debug(target: &str, args: std::fmt::Arguments<'_>) {
     if enabled(LEVEL_DEBUG) {
         eprintln!(
             "{}",
-            format_line('D', std::time::SystemTime::now(), target, &args)
+            format_line('D', std::time::SystemTime::now(), target, args)
         );
     }
 }
@@ -58,7 +58,7 @@ fn format_line(
     prefix: char,
     time: std::time::SystemTime,
     target: &str,
-    message: &std::fmt::Arguments<'_>,
+    message: std::fmt::Arguments<'_>,
 ) -> String {
     format!("{prefix} {} {target}: {message}", rfc3339_utc(time))
 }
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn timestamped_line_has_rfc3339_utc_layout() {
         let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_772_366_400);
-        let line = super::format_line('I', time, "target", &format_args!("msg"));
+        let line = super::format_line('I', time, "target", format_args!("msg"));
         assert_eq!(line, "I 2026-03-01T12:00:00Z target: msg");
     }
 }
