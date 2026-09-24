@@ -90,7 +90,27 @@ async fn drain(
             .get(&r.url, &r.headers, Some(deadline), cancelled)
             .await
         else {
-            errors.push(format!("{label}: fetch failed — chain stopped"));
+            match fetch_stop(
+                cancelled.load(Ordering::Relaxed),
+                Instant::now() >= deadline,
+            ) {
+                Some(FetchStop::Cancelled) => {
+                    truncated = true;
+                    errors.push(format!(
+                        "{}: harvest interrupted — chain stopped before starting another request",
+                        label
+                    ));
+                }
+                Some(FetchStop::Deadline) => {
+                    truncated = true;
+                    errors.push(format!(
+                        "{}: provider time budget ({}s) reached — partial harvest kept; deep feeds need --proxy-url",
+                        label,
+                        provider.time_budget().as_secs()
+                    ));
+                }
+                None => errors.push(format!("{label}: fetch failed — chain stopped")),
+            }
             break;
         };
         // a malformed page (or a provider parser panic) must not sink the run
@@ -128,6 +148,22 @@ async fn drain(
 
 fn should_stop(cancelled: bool) -> bool {
     cancelled
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FetchStop {
+    Cancelled,
+    Deadline,
+}
+
+fn fetch_stop(cancelled: bool, deadline_elapsed: bool) -> Option<FetchStop> {
+    if cancelled {
+        Some(FetchStop::Cancelled)
+    } else if deadline_elapsed {
+        Some(FetchStop::Deadline)
+    } else {
+        None
+    }
 }
 
 pub async fn scrape(
@@ -506,9 +542,9 @@ pub fn write_proxies(path: &Path, proxies: &[ProxyRecord]) -> Result<usize, std:
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactPaths, ProviderRun, ProxyRecord, RunOutcome, Scheme, compute_interrupted_outcome,
-        compute_run_outcome, dedupe, dedupe_provider_batches, should_stop, write_artifacts,
-        write_atomic,
+        ArtifactPaths, FetchStop, ProviderRun, ProxyRecord, RunOutcome, Scheme,
+        compute_interrupted_outcome, compute_run_outcome, dedupe, dedupe_provider_batches,
+        fetch_stop, should_stop, write_artifacts, write_atomic,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::{fs, path::PathBuf};
@@ -532,6 +568,21 @@ mod tests {
 
         cancelled.store(true, Ordering::Relaxed);
         assert!(should_stop(cancelled.load(Ordering::Relaxed)));
+    }
+
+    #[test]
+    fn fetch_stop_cancellation_takes_precedence_over_deadline() {
+        assert_eq!(fetch_stop(true, true), Some(FetchStop::Cancelled));
+    }
+
+    #[test]
+    fn fetch_stop_deadline_only_is_deadline() {
+        assert_eq!(fetch_stop(false, true), Some(FetchStop::Deadline));
+    }
+
+    #[test]
+    fn fetch_stop_without_stop_condition_is_genuine_fetch_failure() {
+        assert_eq!(fetch_stop(false, false), None);
     }
 
     #[test]

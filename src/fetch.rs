@@ -702,6 +702,10 @@ impl Fetcher {
         cancelled: &AtomicBool,
     ) -> Option<String> {
         if cancelled.load(Ordering::Relaxed) {
+            debug(
+                "fetch",
+                format_args!("{url}: fetch cancelled before request"),
+            );
             return None;
         }
         let host = Self::host_of(url);
@@ -781,7 +785,11 @@ impl Fetcher {
             }
             let wait = jittered(Duration::from_secs_f64(1.5 * attempt as f64));
             if !sleep_bounded(wait, deadline, cancelled).await {
-                problem.push_str("; provider deadline reached");
+                problem.push_str(if cancelled.load(Ordering::Relaxed) {
+                    "; fetch cancelled"
+                } else {
+                    "; provider deadline reached"
+                });
                 break;
             }
         }
