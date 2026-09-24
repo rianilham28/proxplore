@@ -217,6 +217,14 @@ pub fn make_proxy(
     if port == 0 {
         return None;
     }
+    // Userinfo splits at its first colon, so delimiter characters would make
+    // the rendered credential ambiguous to downstream consumers.
+    if user.is_some_and(|raw| raw.contains(':') || raw.contains('@')) {
+        return None;
+    }
+    if pass.is_some_and(|raw| raw.contains('@')) {
+        return None;
+    }
     let user = clean_cred(user);
     Some(ProxyRecord {
         scheme,
@@ -339,8 +347,48 @@ mod tests {
         assert_eq!(p.url(), "http://u:@8.8.8.8:80");
         assert!(make_proxy(Scheme::Http, "8.8.8.8", "0", None, None, "x").is_none());
         assert!(make_proxy(Scheme::Http, "8.8.8.8", "65536", None, None, "x").is_none());
-        let no_cred =
-            make_proxy(Scheme::Http, "8.8.8.8", "80", Some("bad user"), None, "x").unwrap();
-        assert!(no_cred.user.is_none()); // junk credential dropped, entry kept (Python parity)
+    }
+
+    #[test]
+    fn ambiguous_userinfo_is_rejected() {
+        assert!(
+            make_proxy(
+                Scheme::Http,
+                "8.8.8.8",
+                "80",
+                Some("u:part"),
+                Some("p"),
+                "x"
+            )
+            .is_none()
+        );
+        assert!(
+            make_proxy(
+                Scheme::Http,
+                "8.8.8.8",
+                "80",
+                Some("u@part"),
+                Some("p"),
+                "x"
+            )
+            .is_none()
+        );
+        assert!(make_proxy(Scheme::Http, "8.8.8.8", "80", Some("u"), Some("p@ss"), "x").is_none());
+
+        let clean = make_proxy(Scheme::Http, "8.8.8.8", "80", Some("u"), Some("p"), "x").unwrap();
+        assert_eq!(clean.url(), "http://u:p@8.8.8.8:80");
+
+        let p = make_proxy(
+            Scheme::Http,
+            "8.8.8.8",
+            "80",
+            Some("u"),
+            Some("p:part"),
+            "x",
+        )
+        .unwrap();
+        assert_eq!(p.url(), "http://u:p:part@8.8.8.8:80");
+        let no_auth = make_proxy(Scheme::Http, "8.8.8.8", "80", None, None, "x").unwrap();
+        assert_eq!(no_auth.url(), "http://8.8.8.8:80");
     }
 }

@@ -14,7 +14,6 @@ const FD_RESERVE: u64 = 512;
 const MEM_RESERVE_KB: u64 = 256_000; // ~250 MB headroom for interpreter + bodies
 const MAX_FD_RAISE: u64 = 65_536;
 
-#[allow(dead_code)] // cpus/fd_limit are diagnostic context the probe logs
 pub struct Capabilities {
     pub cpus: usize,
     pub fd_limit: u64,
@@ -53,33 +52,62 @@ fn raise_fd_limit() -> u64 {
     getrlimit(Resource::NOFILE).map(|(s, _)| s).unwrap_or(soft)
 }
 
+fn size_fetch(cpus: usize, mem_kb: u64, fd_limit: u64) -> usize {
+    let usable_mem_kb = (FD_RESERVE * 4).max(mem_kb.saturating_sub(MEM_RESERVE_KB));
+    let memory_fetch = (usable_mem_kb / FETCH_KB_PER_CONN) as usize;
+    let cpu_fetch = (cpus * 32).min(256).min(memory_fetch);
+    let fd_fetch = fd_limit.saturating_sub(FD_RESERVE) as usize;
+
+    // Keep useful forward progress even on severely constrained hosts.
+    cpu_fetch.min(fd_fetch).max(16)
+}
+
 pub fn probe() -> Capabilities {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let fd_limit = raise_fd_limit();
     let mem_kb = mem_available_kb();
-    let usable_mem_kb = (FD_RESERVE * 4).max(mem_kb.saturating_sub(MEM_RESERVE_KB));
-
-    let mut fetch = (16usize).max(
-        (cpus * 32)
-            .min(256)
-            .min((usable_mem_kb / FETCH_KB_PER_CONN) as usize),
-    );
-    fetch = fetch
-        .max(16)
-        .min(fetch.min((fd_limit - FD_RESERVE).max(16) as usize));
+    let capabilities = Capabilities {
+        cpus,
+        fd_limit,
+        fetch_concurrency: size_fetch(cpus, mem_kb, fd_limit),
+    };
 
     crate::log::info(
         "capacity",
         format_args!(
-            "cpus={cpus} fd={fd_limit} mem={} MB → fetch concurrency={fetch}",
-            mem_kb / 1024
+            "cpus={} fd={} mem={} MB → fetch concurrency={}",
+            capabilities.cpus,
+            capabilities.fd_limit,
+            mem_kb / 1024,
+            capabilities.fetch_concurrency
         ),
     );
-    Capabilities {
-        cpus,
-        fd_limit,
-        fetch_concurrency: fetch,
+    capabilities
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fd_limit_below_reserve_uses_floor() {
+        assert_eq!(size_fetch(8, 16_000_000, FD_RESERVE - 1), 16);
+    }
+
+    #[test]
+    fn fd_limit_above_ceiling_preserves_cpu_limit() {
+        assert_eq!(size_fetch(16, 16_000_000, 100_000), 256);
+    }
+
+    #[test]
+    fn absurdly_low_memory_uses_conservative_reserve() {
+        assert_eq!(size_fetch(8, 1, 1024), 32);
+    }
+
+    #[test]
+    fn normal_machine_uses_existing_ceiling() {
+        assert_eq!(size_fetch(8, 16_000_000, 1024), 256);
     }
 }
