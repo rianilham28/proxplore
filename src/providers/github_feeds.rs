@@ -253,6 +253,22 @@ gh!(
     false,
     [FeedFile::none("proxy.list"),]
 );
+// roosterkid/openproxylist: branch `main` verified via `ls-remote --symref` 2026-09-28.
+// SOCKS5_RAW decayed to 4 rows (below the >=10 gate) — left unwired; the other two
+// lanes cleared it (SOCKS4_RAW 149, HTTPS_RAW 59). HTTP_RAW/ALL_PROXIES_RAW 404.
+gh!(
+    roosterkid,
+    "roosterkid",
+    "roosterkid/openproxylist",
+    "main",
+    "occasional",
+    E,
+    false,
+    [
+        FeedFile::scheme_and(Scheme::Socks4, "SOCKS4_RAW.txt"),
+        FeedFile::scheme_and(Scheme::Https, "HTTPS_RAW.txt"),
+    ]
+);
 
 pub fn all() -> Vec<Arc<dyn Provider>> {
     vec![
@@ -272,5 +288,42 @@ pub fn all() -> Vec<Arc<dyn Provider>> {
         blitzproxy(),
         proxio_io(),
         fate0(),
+        roosterkid(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn roosterkid_is_registered() {
+        let ids: Vec<&str> = crate::providers::all().iter().map(|p| p.id()).collect();
+        assert!(ids.contains(&"roosterkid"));
+    }
+
+    // Guards the re-scope decision itself: the two lanes that cleared the >=10
+    // row gate are fetched, on the probed `main` branch, and the SOCKS5 lane
+    // (decayed to 4 rows) stays unwired so no request can ever 404-then-empty it.
+    #[test]
+    fn roosterkid_fetches_only_the_two_non_decayed_lanes() {
+        let p = crate::providers::all()
+            .into_iter()
+            .find(|p| p.id() == "roosterkid")
+            .expect("roosterkid registered");
+        let reqs = p.requests();
+        let urls: Vec<&str> = reqs.iter().map(|r| r.url.as_str()).collect();
+        assert!(urls.contains(
+            &"https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt"
+        ));
+        assert!(urls.contains(
+            &"https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt"
+        ));
+        assert!(
+            !urls.iter().any(|u| u.contains("SOCKS5_RAW")),
+            "decayed SOCKS5 lane must stay unwired"
+        );
+        assert!(
+            urls.iter().all(|u| u.contains("/main/")),
+            "branch must be the probed main"
+        );
+    }
 }
