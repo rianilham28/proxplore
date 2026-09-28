@@ -1,7 +1,7 @@
 //! proxplore providers — every source, each identified by its exact id.
 //!
 //! The 16 cron-refreshed GitHub raw repos share one data table
-//! (github_feeds.rs, composed on the GithubFeed base); the 14 sources with
+//! (github_feeds.rs, composed on the GithubFeed base); the 15 sources with
 //! real logic — JSON APIs, pagination, bespoke HTML — own one module each.
 //! Everything is wired into `all()`; the filesystem guard in main.rs catches
 //! a module created but never registered.
@@ -30,6 +30,7 @@ mod e89ip;
 mod free_proxy_list;
 mod ip3366;
 mod proxydb;
+mod scrappey;
 
 pub fn all() -> Vec<Arc<dyn Provider>> {
     let mut v = github_feeds::all();
@@ -47,6 +48,7 @@ pub fn all() -> Vec<Arc<dyn Provider>> {
         pubproxy::new(),
         proxydb::new(),
         proxygenerator1::new(),
+        scrappey::new(),
         spys::new(),
     ]);
     v
