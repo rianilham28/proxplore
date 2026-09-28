@@ -50,7 +50,7 @@
 Run:
 ```bash
 cargo run --release -- --list-providers | wc -l | tee /tmp/baseline-registry-count.txt
-cargo run --release --output /tmp/baseline.txt >/dev/null 2>&1; echo "exit=$?"
+cargo run --release -- --output /tmp/baseline.txt >/tmp/baseline-run.log 2>&1; echo "exit=$?"
 python3 -c "import json,collections;c=collections.Counter(json.loads(l)['source'] for l in open('/tmp/baseline.provenance.jsonl'));[print(k,v) for k,v in sorted(c.items())]" | tee /tmp/baseline-source-counts.txt
 ```
 Expected: registry count written (this is the measured baseline — README's "30" is a claim, not evidence); full harvest exit 0 or 2; per-`source` counts saved for `free-proxy-list-net`, `proxyscrape`, `spys` (they anchor Task 1/2/3 lane-delta proofs).
@@ -584,7 +584,7 @@ Expected: exit 0, >0 lines; any 0-line lane → remove it (its Task 4-style drop
 
 Run:
 ```bash
-cargo run --release --output /tmp/proxies.txt; echo exit=$?
+cargo run --release -- --output /tmp/proxies.txt; echo exit=$?
 python3 -c "
 import json
 lines = [json.loads(l) for l in open('/tmp/proxies.provenance.jsonl')]
