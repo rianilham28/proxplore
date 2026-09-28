@@ -6,9 +6,12 @@
 //! — the entries parser handles both), so the scheme default is http.
 //! Undeclared entries default to http.
 //!
-//! A second mirror, spys.me/socks.txt, serves the sibling SOCKS list in the
-//! same bare ip:port shape (probe-verified 2026-09-28). It declares no
-//! scheme prefixes, so it is fetched with the same http default.
+//! A second mirror, spys.me/socks.txt, serves the operator's SOCKS list in the
+//! same bare ip:port shape (probe-verified 2026-09-28: 400 rows, 215 of them
+//! on the SOCKS port 1080, 34 on 9050, 23 on 4145). It self-describes as a
+//! SOCKS list in its header and never prefixes a scheme, so the request
+//! defaults every row to socks5 — the default, not an override, is what makes
+//! bare lines parse as SOCKS.
 
 use std::sync::Arc;
 
@@ -24,7 +27,7 @@ impl Provider for Spys {
         "https://www.spys.one/en/".into()
     }
     fn protocols(&self) -> String {
-        "http".into()
+        "http,socks5".into()
     }
     fn refresh(&self) -> &'static str {
         "near-realtime"
@@ -33,8 +36,8 @@ impl Provider for Spys {
         vec![
             Request::new("http://spys.me/proxy.txt", "txt")
                 .with(Some(Scheme::Http), ParseKind::Entries),
-            Request::new("http://spys.me/socks.txt", "socks")
-                .with(Some(Scheme::Http), ParseKind::Entries),
+            Request::new("http://spys.me/socks.txt", "socks5")
+                .with(Some(Scheme::Socks5), ParseKind::Entries),
         ]
     }
 }
@@ -48,14 +51,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requests_are_txt_mirror_with_http_default() {
+    fn requests_cover_both_probe_verified_mirrors() {
+        // Row count grows only when a probe-verified mirror survives: 1 probe
+        // (2026-09-28) found socks.txt 200/400 tokens and three 404s.
         let requests = Spys.requests();
-        assert_eq!(requests.len(), 2); // 1 probe-verified mirror survives
+        assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].url, "http://spys.me/proxy.txt");
         assert_eq!(requests[0].label, "txt");
+        assert_eq!(requests[0].scheme, Some(Scheme::Http));
         assert!(matches!(requests[0].parser, ParseKind::Entries));
         assert_eq!(requests[1].url, "http://spys.me/socks.txt");
-        assert_eq!(requests[1].label, "socks");
+        assert_eq!(requests[1].label, "socks5");
+        assert_eq!(
+            requests[1].scheme,
+            Some(Scheme::Socks5),
+            "bare ip:port lines never carry a scheme, so the request default \
+             is the only thing that labels this SOCKS pool"
+        );
         assert!(matches!(requests[1].parser, ParseKind::Entries));
     }
 }
