@@ -22,7 +22,7 @@
 - Never force-push; conventional commit subjects (lowercase, imperative, no trailing period).
 
 **Evidence-artifact conventions (verified against `src/runner.rs`, use in every smoke/acceptance step):**
-- Provenance file: `<stem>.provenance.jsonl` (e.g. `--output /tmp/fpl.txt` → `/tmp/fpl.provenance.jsonl`), never `<stem>.jsonl`.
+- Provenance file: `<stem>.jsonl` (e.g. `--output /tmp/fpl.txt` → `/tmp/fpl.jsonl`). The `.provenance.jsonl` suffix appears ONLY when `--output` itself ends in `.jsonl` (candidate == output → collision disambiguation, `runner.rs` `disambiguate`); verified by baseline run 2026-09-28: `/tmp/baseline.txt` produced `/tmp/baseline.jsonl` + `/tmp/baseline.summary.json`.
 - Provenance line schema: `{"proxy": "<url>", "source": "<provider-id>", "run_started_at": "..."}` — field is **`source`**, and per-line contribution is proven by `source == "<id>"` counts; `Request.label` is never persisted (it exists only in logs), so label-grep is forbidden.
 - Summary file: `<stem>.summary.json`; outcome lives under **`outcome`** (`full`/`partial`/...), plus `exit_code`, `records_total`, `records_unique`, and `providers[]` entries of `{id, ok_requests, total_requests, records, duration_secs, truncated, errors}`.
 - Per-lane record counts come from `providers[].records` in a `--providers <id>` run, or from `source`-grouped provenance counts in a full run.
@@ -51,7 +51,7 @@ Run:
 ```bash
 cargo run --release -- --list-providers | wc -l | tee /tmp/baseline-registry-count.txt
 cargo run --release -- --output /tmp/baseline.txt >/tmp/baseline-run.log 2>&1; echo "exit=$?"
-python3 -c "import json,collections;c=collections.Counter(json.loads(l)['source'] for l in open('/tmp/baseline.provenance.jsonl'));[print(k,v) for k,v in sorted(c.items())]" | tee /tmp/baseline-source-counts.txt
+python3 -c "import json,collections;c=collections.Counter(json.loads(l)['source'] for l in open('/tmp/baseline.jsonl'));[print(k,v) for k,v in sorted(c.items())]" | tee /tmp/baseline-source-counts.txt
 ```
 Expected: registry count written (this is the measured baseline — README's "30" is a claim, not evidence); full harvest exit 0 or 2; per-`source` counts saved for `free-proxy-list-net`, `proxyscrape`, `spys` (they anchor Task 1/2/3 lane-delta proofs).
 
@@ -127,8 +127,8 @@ Expected: PASS.
 
 - [ ] **Step 7: Live smoke the lane**
 
-Run: `cargo run --release -- --providers free-proxy-list-net --output /tmp/fpl.txt; echo exit=$?; wc -l < /tmp/fpl.txt; python3 -c "import json,collections;print(collections.Counter(json.loads(l)['source'] for l in open('/tmp/fpl.provenance.jsonl')))"`
-Expected: exit 0 or 2; output non-empty; provenance `source` counts show `free-proxy-list-net` records — and to isolate the *new lane's* contribution, additionally run `--output /tmp/us.txt` and confirm `/tmp/us.provenance.jsonl` line count > the pre-change baseline recorded in Task 0 (all four lanes share one source id, so lane-level proof is baseline-delta, not source grouping).
+Run: `cargo run --release -- --providers free-proxy-list-net --output /tmp/fpl.txt; echo exit=$?; wc -l < /tmp/fpl.txt; python3 -c "import json,collections;print(collections.Counter(json.loads(l)['source'] for l in open('/tmp/fpl.jsonl')))"`
+Expected: exit 0 or 2; output non-empty; provenance `source` counts show `free-proxy-list-net` records — and to isolate the *new lane's* contribution, additionally run `--output /tmp/us.txt` and confirm `/tmp/us.jsonl` line count > the pre-change baseline recorded in Task 0 (all four lanes share one source id, so lane-level proof is baseline-delta, not source grouping).
 
 - [ ] **Step 8: Commit**
 
@@ -293,7 +293,7 @@ Expected: PASS.
 
 - [ ] **Step 7: Live smoke the lane**
 
-Run: `cargo run --release -- --providers spys --output /tmp/spys.txt; echo exit=$?; wc -l < /tmp/spys.txt; python3 -c "import json;print(sum(1 for l in open('/tmp/spys.provenance.jsonl')))"`
+Run: `cargo run --release -- --providers spys --output /tmp/spys.txt; echo exit=$?; wc -l < /tmp/spys.txt; python3 -c "import json;print(sum(1 for l in open('/tmp/spys.jsonl')))"`
 Expected: exit 0 or 2; provenance line count > the `/tmp/baseline-source-counts.txt` spys entry from Task 0 (lane-level proof is baseline delta — `Request.label` is never persisted, so there is nothing label-specific to grep).
 
 - [ ] **Step 8: Commit**
@@ -428,7 +428,7 @@ Expected: one line with id, site URL, protocols.
 
 - [ ] **Step 9: Live smoke the provider**
 
-Run: `cargo run --release -- --providers scrappey --output /tmp/scrappey.txt; echo exit=$?; wc -l < /tmp/scrappey.txt; python3 -c "import json;print(sum(1 for l in open('/tmp/scrappey.provenance.jsonl')))"`
+Run: `cargo run --release -- --providers scrappey --output /tmp/scrappey.txt; echo exit=$?; wc -l < /tmp/scrappey.txt; python3 -c "import json;print(sum(1 for l in open('/tmp/scrappey.jsonl')))"`
 Expected: exit 0; provenance line count > 0 (drop the provider — remove `mod scrappey;` and `scrappey::new(),` from `mod.rs`, delete the file, no commit — if the live parse yields 0: parser/structure mismatch means Steps 1-2 observed something different from the fixture).
 
 - [ ] **Step 10: Commit**
@@ -587,7 +587,7 @@ Run:
 cargo run --release -- --output /tmp/proxies.txt; echo exit=$?
 python3 -c "
 import json
-lines = [json.loads(l) for l in open('/tmp/proxies.provenance.jsonl')]
+lines = [json.loads(l) for l in open('/tmp/proxies.jsonl')]
 s = json.load(open('/tmp/proxies.summary.json'))
 print('provenance lines:', len(lines), 'fields:', sorted(lines[0].keys()))
 print('outcome:', s['outcome'], 'exit_code:', s['exit_code'], 'unique:', s['records_unique'])"
@@ -605,7 +605,7 @@ Run:
 ```bash
 python3 -c "
 import json,collections
-c=collections.Counter(json.loads(l)['source'] for l in open('/tmp/proxies.provenance.jsonl'))
+c=collections.Counter(json.loads(l)['source'] for l in open('/tmp/proxies.jsonl'))
 [print(k,v) for k,v in c.most_common()]"
 ```
 Expected: every shipped **provider id** shows >0 records; new/changed providers (`scrappey`, `roosterkid`, `free-proxy-list-net`, `proxyscrape`, `spys`) show ≥ their Task 0 baseline counts from `/tmp/baseline-source-counts.txt` (lane-level deltas for providers sharing an id). Any newly added provider at 0 → remove it from the registry and re-run (drop rule).
@@ -641,7 +641,7 @@ Then present the execution report: lanes shipped/dropped with per-lane smoke evi
 
 **2. Step scan:** each step = one probe (command + expected), one test (named, with exact assertions), one code change (exact location + snippet), one run (command + expected), or one commit (exact subject). Probes carry explicit drop conditions, and four fixture decisions are deferred to probe evidence rather than guessed: Scrappey's row structure (table vs SSR JSON), spys surviving mirror URLs, the us-proxy textarea presence, and the proxyscrape `ssl` subset semantics. Every drop rule explicitly names which steps to skip so no failing test or half-wired lane survives a dropped lane.
 
-**3. Type consistency:** `requests() -> Vec<Request>`, `parse_rows(body, Option<Scheme>) -> Vec<ProxyRecord>`, `PROTOCOLS: [(Scheme, &str, &str); 4]` (3-tuple of scheme/label/query-fragment after the Task 2 restructure), `gh!` macro arg order — all match the inspected definitions; `protocols()` string updated alongside `PROTOCOLS` in Task 2 (display contract). Evidence commands use the verified artifact schema: `<stem>.provenance.jsonl` with `source` field, `<stem>.summary.json` with `outcome`/`exit_code`/`providers[].records`.
+**3. Type consistency:** `requests() -> Vec<Request>`, `parse_rows(body, Option<Scheme>) -> Vec<ProxyRecord>`, `PROTOCOLS: [(Scheme, &str, &str); 4]` (3-tuple of scheme/label/query-fragment after the Task 2 restructure), `gh!` macro arg order — all match the inspected definitions; `protocols()` string updated alongside `PROTOCOLS` in Task 2 (display contract). Evidence commands use the verified artifact schema: `<stem>.jsonl` with `source` field, `<stem>.summary.json` with `outcome`/`exit_code`/`providers[].records`.
 
 **4. Review Focus:** all five lines have their owning task and test: #1 → Task 2 Steps 1-2; #2 → Task 1 Steps 1-2 + smoke Step 7; #3 → Task 3 Steps 1-2; #4 → Task 4 Steps 1-2 + smoke Step 9; #5 → Task 5 Step 1.
 
