@@ -237,10 +237,9 @@ Run:
 ```bash
 for u in socks.txt https.txt socks5.txt proxy-socks.txt; do
   printf '%s ' "$u"
-  curl -sS -o "/tmp/spys-$u" -w '%{http_code}\n" ' "http://spys.me/$u" 2>/dev/null || echo "err"
+  curl -sS -o "/tmp/spys-$u" -w '%{http_code}\n' "http://spys.me/$u" || echo "err"
 done
 ```
-(Note: fix the stray quote — exact command: `curl -sS -o "/tmp/spys-$u" -w '%{http_code}\n' "http://spys.me/$u"`.)
 Expected per URL: HTTP `200` AND body containing ≥10 `ip:port`-shaped tokens:
 ```bash
 grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{2,5}' "/tmp/spys-$u" | wc -l
@@ -563,7 +562,7 @@ Add surviving candidates as rows to the appropriate §1/§2/§3 table with statu
 
 - [ ] **Step 4: Wire each survivor (0..N lanes)**
 
-Per survivor, follow the matching existing pattern — GitHub raw feed → `gh!` row (Task 5 Step 4 shape); JSON/TXT API → module per `proxyscrape.rs`/`geonode.rs`; HTML page → module per Task 4. Include the pattern-appropriate unit test (URL-construction or fixture parser test), registration in `mod.rs` if new, and `cargo test --locked` after each lane. **One commit per lane**, subject `feat: add <id> provider` or `feat: add <id> lane`.
+Per survivor, follow the matching existing pattern — GitHub raw feed → `gh!` row (Task 5 Step 4 shape, and Task 5 Step 1's branch-first probe rule applies: `ls-remote` the default branch, never hardcode); JSON/TXT API → module per `proxyscrape.rs`/`geonode.rs`; HTML page → module per Task 4. Include the pattern-appropriate unit test (URL-construction or fixture parser test), registration in `mod.rs` if new, and `cargo test --locked` after each lane. **One commit per lane**, subject `feat: add <id> provider` or `feat: add <id> lane`.
 
 - [ ] **Step 5: Live smoke each new lane**
 
@@ -640,7 +639,7 @@ Then present the execution report: lanes shipped/dropped with per-lane smoke evi
 - Acceptance 1-5 → Task 8 Steps 1-5. ✅
 - Gap found and fixed: acceptance criterion 3 (catalog dated today) is Task 6; criterion 5 (README counts) is Task 8 Step 4. No gaps remain.
 
-**2. Step scan:** each step = one probe (command + expected), one test (named, with exact assertions), one code change (exact location + snippet), one run (command + expected), or one commit (exact subject). Source-specific open decisions (Scrappey cell structure, spys surviving URLs, roosterkid branch) are delegated to probe output with fixtures built from observation — decided by evidence the step produces, not by guesswork. Every drop rule explicitly names which steps to skip so no failing test or half-wired lane survives a dropped lane.
+**2. Step scan:** each step = one probe (command + expected), one test (named, with exact assertions), one code change (exact location + snippet), one run (command + expected), or one commit (exact subject). Probes carry explicit drop conditions, and four fixture decisions are deferred to probe evidence rather than guessed: Scrappey's row structure (table vs SSR JSON), spys surviving mirror URLs, the us-proxy textarea presence, and the proxyscrape `ssl` subset semantics. Every drop rule explicitly names which steps to skip so no failing test or half-wired lane survives a dropped lane.
 
 **3. Type consistency:** `requests() -> Vec<Request>`, `parse_rows(body, Option<Scheme>) -> Vec<ProxyRecord>`, `PROTOCOLS: [(Scheme, &str, &str); 4]` (3-tuple of scheme/label/query-fragment after the Task 2 restructure), `gh!` macro arg order — all match the inspected definitions; `protocols()` string updated alongside `PROTOCOLS` in Task 2 (display contract). Evidence commands use the verified artifact schema: `<stem>.provenance.jsonl` with `source` field, `<stem>.summary.json` with `outcome`/`exit_code`/`providers[].records`.
 
