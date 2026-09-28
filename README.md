@@ -12,11 +12,10 @@ sibling and downstream consumer.
 (`free-proxy-sources.md` documents the research behind every row):
 
 - **TXT/JSON/CSV APIs** — proxyscrape (http plus the `ssl=yes` https subset),
-  geonode, databay, pubproxy, proxifly, proxylister, advanced.name,
-  m1noa-proxypool, proxygenerator1, spys (TXT mirror `spys.me/proxy.txt`
-  plus the socks sub-lists)
+  geonode, databay, pubproxy, proxifly, proxylister, spys (TXT mirror
+  `spys.me/proxy.txt` plus the socks sub-lists)
 - **HTML list pages** — proxydb, free-proxy-list.net (main list plus the
-  us-proxy sub-page textarea), 89ip, ip3366, scrappey
+  us-proxy sub-page textarea), advanced.name, 89ip, ip3366, scrappey
 - **GitHub raw feeds** — thespeedx, hproxy, monosans, databay-labs, xyzs996,
   aliilapro, vpslabcloud, iplocate, fate0, sunny9577, hideip-me, hookzof,
   vakhov, rix4uni, blitzproxy, proxio-io, m1noa-proxypool, proxygenerator1,
