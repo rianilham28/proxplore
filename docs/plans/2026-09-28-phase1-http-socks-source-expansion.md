@@ -29,7 +29,7 @@
 
 ## Review Focus
 
-1. **proxyscrape `ssl` filter** — catalog documents `ssl` as a separate param from `protocol` (which only takes http/socks4/socks5); an https pool is by construction a *subset* of http. Expect: probe `protocol=http&ssl=true` vs `protocol=http`; pass condition = non-empty strict subset (a legitimately distinct slice), NOT distinct counts. Wrong param spelling → empty result → lane dropped.
+1. **proxyscrape `ssl` filter** — catalog documents `ssl` as a separate param from `protocol` (which only takes http/socks4/socks5); the API's spelling is `ssl=yes`/`ssl=no` (`ssl=true` → HTTP 400, verified 2026-09-28). Expect: probe `protocol=http&ssl=yes` vs `protocol=http`; pass condition = both non-empty and counts differ (the ssl slice need NOT be a subset of the http pool — live: 501 vs 1287 with 29 exclusive rows); drop only if ssl empty or pools identical.
 2. **us-proxy textarea absence** — if `us-proxy.html` lacks the raw `<textarea>` block, `parse_textarea` returns 0 records on a 200 response (silent empty lane). Expect: probe greps for `<textarea` before wiring; smoke asserts >0 records.
 3. **spys mirror coverage** — `spys.me` may expose only `proxy.txt`; guessing sibling URLs (e.g. `socks.txt`) risks 404 lanes. Expect: probe each candidate URL for HTTP 200 + parseable rows before adding `Request` rows; only surviving URLs wired.
 4. **Scrappey extraction shape** — verified 2026-09-28: rows are `<tr data-protocol="http|socks4|socks5" data-search="ip:port">` cells (table) plus a `window.__SSR_DATA__` JSON block; all 180 rows are stale `fallback`/`likelyDead:true` (2026-09-23) — quality is proxalyze's call, not a drop condition. Expect: table-cell parser reading `data-protocol` per row (NOT a default-http assumption — pool is 60/60/60 http/socks4/socks5); fixture built from the observed row shape; parser returning 0 rows on live smoke → drop.
@@ -150,15 +150,15 @@ Run: `git add src/providers/free_proxy_list.rs && git commit -m "feat: add us-pr
 Run:
 ```bash
 curl -sS 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text' -o /tmp/ps-http.txt
-curl -sS 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&ssl=true&proxy_format=ipport&format=text' -o /tmp/ps-ssl.txt
+curl -sS 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&ssl=yes&proxy_format=ipport&format=text' -o /tmp/ps-ssl.txt
 wc -l /tmp/ps-http.txt /tmp/ps-ssl.txt
 ```
-Expected: `ssl=true` result **non-empty** (if empty → param spelling wrong or filter yields nothing → drop lane, skip to Task 3). Note: `protocol` deliberately stays `http` — catalog §1 documents `ssl` as a separate filter and `protocol` only takes http/socks4/socks5; do NOT try `protocol=https`.
+Expected: `ssl=yes` result **non-empty** (the API's spelling is `ssl=yes`/`ssl=no` — `ssl=true` returns HTTP 400 `Invalid ssl, please use yes or no.`, verified 2026-09-28). If `ssl=yes` empty → drop lane, skip to Task 3. Note: `protocol` deliberately stays `http` — catalog §1 documents `ssl` as a separate filter and `protocol` only takes http/socks4/socks5; do NOT try `protocol=https`.
 
-- [ ] **Step 2: Verify the ssl slice is a subset of http (correctness, not distinctness)**
+- [ ] **Step 2: Verify the ssl slice is a distinct pool, not a silent alias**
 
-Run: `comm -23 <(sort -u /tmp/ps-ssl.txt) <(sort -u /tmp/ps-http.txt) | wc -l`
-Expected: `0` — every ssl-filtered row must also appear in the unfiltered http pool (the ssl slice is a subset by construction; rows *outside* the http pool would mean the filter semantics differ from documented and the labeled `https` scheme claim is unsupported → drop lane, skip to Task 3). Then record `sort -u /tmp/ps-ssl.txt | wc -l` — if it equals the http unique count (filter ignored, identical pools) → also drop: no distinct slice, zero new volume.
+Run: `sort -u /tmp/ps-ssl.txt | wc -l; sort -u /tmp/ps-http.txt | wc -l`
+Expected: two **different** non-zero counts (the ssl slice is a CONNECT-capable subset — by design it may overlap the http pool and need NOT be contained in it; live evidence 2026-09-28: 501 ssl-yes vs 1287 http with 29 exclusive rows, 0 churn across refetch). Drop only if: ssl count is 0 (empty filter), or ssl unique == http unique (filter ignored — identical pools, zero new volume, same rule as the 89ip/hproxy exclusions). Spec's gate for this lane: "live probe confirms distinct rows exist."
 
 - [ ] **Step 3: Write the failing test**
 
@@ -178,7 +178,7 @@ mod tests {
         let https_req = &provider.requests()[1];
         assert_eq!(
             https_req.url,
-            format!("{API}?request=display_proxies&protocol=http&ssl=true&proxy_format=ipport&format=text")
+            format!("{API}?request=display_proxies&protocol=http&ssl=yes&proxy_format=ipport&format=text")
         );
         assert_eq!(https_req.scheme, Some(Scheme::Https));
         assert_eq!(https_req.label, "https");
@@ -198,7 +198,7 @@ The https lane differs only by an extra query param, so the table's second field
 ```rust
 const PROTOCOLS: [(Scheme, &str, &str); 4] = [
     (Scheme::Http, "http", "protocol=http"),
-    (Scheme::Https, "https", "protocol=http&ssl=true"),
+    (Scheme::Https, "https", "protocol=http&ssl=yes"),
     (Scheme::Socks4, "socks4", "protocol=socks4"),
     (Scheme::Socks5, "socks5", "protocol=socks5"),
 ];
@@ -647,4 +647,4 @@ Then present the execution report: lanes shipped/dropped with per-lane smoke evi
 
 **5. Proportion:** ~700 lines for 9 tasks covering baselines, probes, 4 lane wirings, a sweep, and acceptance — code blocks are fixtures/snippets, not bodies; `parse_rows`' body and the spys/roosterkid wiring are deliberately deferred to probe output (spec forbids guessing source quirks).
 
-**6. Post-oracle fixes applied (all 8 findings + Scrappey advisory):** Task 2 probe rewritten from unsatisfiable `protocol=https` distinctness to `ssl=true` subset semantics; evidence commands moved to verified artifact schema (finding 2-4); drop rules now name skipped steps (finding 5); Task 0 baseline added (finding 6); roosterkid branch probed via `ls-remote` (finding 7); `mod.rs` doc counts in Task 4 Step 6 (finding 8); Scrappey structure verified live with `data-protocol` per-row scheme and SSR-JSON fallback (advisory).
+**6. Post-oracle fixes applied (all 8 findings + Scrappey advisory):** Task 2 probe rewritten from unsatisfiable `protocol=https` distinctness to the `ssl=yes` distinct-pool gate (spelling corrected post-probe: `ssl=true` 400s); evidence commands moved to verified artifact schema (finding 2-4); drop rules now name skipped steps (finding 5); Task 0 baseline added (finding 6); roosterkid branch probed via `ls-remote` (finding 7); `mod.rs` doc counts in Task 4 Step 6 (finding 8); Scrappey structure verified live with `data-protocol` per-row scheme and SSR-JSON fallback (advisory).
