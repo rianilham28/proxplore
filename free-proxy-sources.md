@@ -160,6 +160,7 @@ Scout lanes overlap by design; each host appears **once** in this catalog. Seen-
 | 89ip.cn, ip3366.net, kuaidaili.com, hide.mn | HtmlLists, SocksNiche | §2 |
 | proxy-list.download | TxtFeeds, HtmlLists | §8 dead (single registry row) |
 | fate0/proxylist (live) vs fate0/getproxy (archived) | TxtFeeds vs GitHubFeeds | §3 / §8 — distinct repos, not a dup |
+| mmpx12/proxy-list (wired) vs ShiftyTR/Proxy-List (rejected, stale) | Wave2Discovery | §3 / §3a — **same upstream, not a dup worth wiring twice.** Verified 2026-09-28: `comm -12` on the two socks4 files returns 661/661 identical lines (mmpx12 has one extra), and socks5 279/279. mmpx12 is the live copy (daily refresh); ShiftyTR is a 2023-08-11 fossil of the same scrape. Only the live one is wired. |
 
 ## 10. Independent verification log
 

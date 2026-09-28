@@ -1,7 +1,9 @@
 //! The GitHub raw-feed lane — every cron-refreshed repo that publishes one
 //! protocol-pure file per scheme. Identity, URLs, branches, and lanes here
-//! are verified against the live repo trees (expansion/research sweeps) and
-//! mirror the proven Python providers 1:1 (ids keep their exact hyphenation).
+//! are verified against the live repo trees (expansion/research sweeps).
+//! Most mirror a proven Python provider 1:1 (ids keep their exact
+//! hyphenation); the 2026-09-28 wave-2 rows below are new discoveries with no
+//! Python counterpart.
 
 use std::sync::Arc;
 
