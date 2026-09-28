@@ -11,10 +11,11 @@ use std::sync::Arc;
 use crate::model::{ParseKind, Provider, Request, Scheme};
 
 const API: &str = "https://api.proxyscrape.com/v4/free-proxy-list/get";
-const PROTOCOLS: [(Scheme, &str); 3] = [
-    (Scheme::Http, "http"),
-    (Scheme::Socks4, "socks4"),
-    (Scheme::Socks5, "socks5"),
+const PROTOCOLS: [(Scheme, &str, &str); 4] = [
+    (Scheme::Http, "http", "protocol=http"),
+    (Scheme::Https, "https", "protocol=http&ssl=yes"),
+    (Scheme::Socks4, "socks4", "protocol=socks4"),
+    (Scheme::Socks5, "socks5", "protocol=socks5"),
 ];
 
 pub struct ProxyScrape;
@@ -27,7 +28,7 @@ impl Provider for ProxyScrape {
         "https://www.proxyscrape.com/free-proxy-list".into()
     }
     fn protocols(&self) -> String {
-        "http,socks4,socks5".into()
+        "http,https,socks4,socks5".into()
     }
     fn refresh(&self) -> &'static str {
         "~1 min"
@@ -35,12 +36,12 @@ impl Provider for ProxyScrape {
     fn requests(&self) -> Vec<Request> {
         PROTOCOLS
             .iter()
-            .map(|(scheme, proto)| {
+            .map(|(scheme, label, query)| {
                 Request::new(
                     format!(
-                        "{API}?request=display_proxies&protocol={proto}&proxy_format=ipport&format=text"
+                        "{API}?request=display_proxies&{query}&proxy_format=ipport&format=text"
                     ),
-                    *proto,
+                    *label,
                 )
                 .with(Some(*scheme), ParseKind::Entries)
             })
@@ -50,4 +51,25 @@ impl Provider for ProxyScrape {
 
 pub fn new() -> Arc<dyn Provider> {
     Arc::new(ProxyScrape)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_cover_http_https_slice_and_socks_lanes() {
+        let provider = ProxyScrape;
+        let requests = provider.requests();
+        let labels: Vec<&str> = requests.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["http", "https", "socks4", "socks5"]);
+        assert_eq!(provider.protocols(), "http,https,socks4,socks5");
+        let https_req = &requests[1];
+        let expected = format!(
+            "{API}?request=display_proxies&protocol=http&ssl=yes&proxy_format=ipport&format=text"
+        );
+        assert_eq!(https_req.url, expected);
+        assert_eq!(https_req.scheme, Some(Scheme::Https));
+        assert_eq!(https_req.label, "https");
+    }
 }
