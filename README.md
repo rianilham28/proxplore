@@ -11,9 +11,10 @@ sibling and downstream consumer.
 36 identified providers across the catalog's three keyless lanes
 (`free-proxy-sources.md` documents the research behind every row):
 
-- **TXT/JSON/CSV APIs** — proxyscrape (http plus the `ssl=yes` https subset),
-  geonode, databay, pubproxy, proxifly, proxylister, spys (TXT mirror
-  `spys.me/proxy.txt` plus the socks sub-lists)
+- **TXT/JSON/CSV APIs** — proxyscrape (http plus the `ssl=yes` https slice,
+  which overlaps but is not a subset of the http lane), geonode, databay,
+  pubproxy, proxifly, proxylister, spys (TXT mirror `spys.me/proxy.txt` plus
+  the socks mirror `spys.me/socks.txt`)
 - **HTML list pages** — proxydb, free-proxy-list.net (main list plus the
   us-proxy sub-page textarea), advanced.name, 89ip, ip3366, scrappey
 - **GitHub raw feeds** — thespeedx, hproxy, monosans, databay-labs, xyzs996,

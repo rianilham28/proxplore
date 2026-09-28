@@ -7,11 +7,13 @@
 //! Undeclared entries default to http.
 //!
 //! A second mirror, spys.me/socks.txt, serves the operator's SOCKS list in the
-//! same bare ip:port shape (probe-verified 2026-09-28: 400 rows, 215 of them
-//! on the SOCKS port 1080, 34 on 9050, 23 on 4145). It self-describes as a
-//! SOCKS list in its header and never prefixes a scheme, so the request
-//! defaults every row to socks5 — the default, not an override, is what makes
-//! bare lines parse as SOCKS.
+//! same bare ip:port shape (probe-verified 2026-09-28: 400 rows). The two
+//! mirrors cross-link in their headers (proxy.txt names socks.txt as
+//! `Socks proxy=…`), but neither self-labels; the port mix is the real
+//! evidence — 1080 ×215, 9050 ×34, 4145 ×23 at probe time, all canonical
+//! SOCKS ports. It never prefixes a scheme, so the request defaults every
+//! row to socks5 — the default, not an override, is what makes bare lines
+//! parse as SOCKS.
 
 use std::sync::Arc;
 

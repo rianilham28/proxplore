@@ -256,8 +256,9 @@ gh!(
     [FeedFile::none("proxy.list"),]
 );
 // roosterkid/openproxylist: branch `main` verified via `ls-remote --symref` 2026-09-28.
-// SOCKS5_RAW decayed to 4 rows (below the >=10 gate) — left unwired; the other two
-// lanes cleared it (SOCKS4_RAW 149, HTTPS_RAW 59). HTTP_RAW/ALL_PROXIES_RAW 404.
+// SOCKS5_RAW decayed to a handful of rows (below the >=10 gate) — left
+// unwired; the other two lanes cleared it (~150 socks4 / ~60 https rows).
+// HTTP_RAW/ALL_PROXIES_RAW 404.
 gh!(
     roosterkid,
     "roosterkid",

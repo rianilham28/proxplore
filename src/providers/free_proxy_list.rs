@@ -7,6 +7,9 @@
 //! per-row "Proxy Type" column, so that page is parsed from cells instead
 //! and self-corrects when Socks5 rows (re)appear. Old country subdomains
 //! (us./socks5./scoped-v3.) are NXDOMAIN and unreferenced.
+//!
+//! The us-proxy page is a further instance of the first case: it carries the
+//! same raw <textarea> and is parsed with the same component (scheme http).
 
 use std::sync::Arc;
 
