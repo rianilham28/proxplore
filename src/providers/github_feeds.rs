@@ -269,6 +269,70 @@ gh!(
         FeedFile::scheme_and(Scheme::Https, "HTTPS_RAW.txt"),
     ]
 );
+// ── Wave-2 discovery (2026-09-28) ── every branch below came from
+// `git ls-remote --symref <repo> HEAD`; every file cleared the >=10-token gate.
+gh!(
+    zaeem20,
+    "zaeem20",
+    "Zaeem20/FREE_PROXIES_LIST",
+    "master",
+    "hourly",
+    E,
+    false,
+    [
+        FeedFile::scheme_and(Scheme::Http, "http.txt"),
+        FeedFile::scheme_and(Scheme::Https, "https.txt"),
+        FeedFile::scheme_and(Scheme::Socks4, "socks4.txt"),
+        FeedFile::scheme_and(Scheme::Socks5, "socks5.txt"),
+    ]
+);
+// TuanMinPay has no https file (404) — the other three are hourly-refreshed.
+gh!(
+    tuanminpay,
+    "tuanminpay",
+    "TuanMinPay/live-proxy",
+    "master",
+    "hourly",
+    E,
+    false,
+    [
+        FeedFile::scheme_and(Scheme::Http, "http.txt"),
+        FeedFile::scheme_and(Scheme::Socks4, "socks4.txt"),
+        FeedFile::scheme_and(Scheme::Socks5, "socks5.txt"),
+    ]
+);
+gh!(
+    mmpx12,
+    "mmpx12",
+    "mmpx12/proxy-list",
+    "master",
+    "daily",
+    E,
+    false,
+    [
+        FeedFile::scheme_and(Scheme::Http, "http.txt"),
+        FeedFile::scheme_and(Scheme::Https, "https.txt"),
+        FeedFile::scheme_and(Scheme::Socks4, "socks4.txt"),
+        FeedFile::scheme_and(Scheme::Socks5, "socks5.txt"),
+    ]
+);
+// ErcinDedeoglu nests the per-protocol files under proxies/ (the 2026 wave's
+// largest hourly pool; branch `main`, not `master`).
+gh!(
+    ercindedeguoglu,
+    "ercindedeguoglu",
+    "ErcinDedeoglu/proxies",
+    "main",
+    "hourly",
+    E,
+    false,
+    [
+        FeedFile::scheme_and(Scheme::Http, "proxies/http.txt"),
+        FeedFile::scheme_and(Scheme::Https, "proxies/https.txt"),
+        FeedFile::scheme_and(Scheme::Socks4, "proxies/socks4.txt"),
+        FeedFile::scheme_and(Scheme::Socks5, "proxies/socks5.txt"),
+    ]
+);
 
 pub fn all() -> Vec<Arc<dyn Provider>> {
     vec![
@@ -289,6 +353,10 @@ pub fn all() -> Vec<Arc<dyn Provider>> {
         proxio_io(),
         fate0(),
         roosterkid(),
+        zaeem20(),
+        tuanminpay(),
+        mmpx12(),
+        ercindedeguoglu(),
     ]
 }
 
@@ -325,5 +393,66 @@ mod tests {
             urls.iter().all(|u| u.contains("/main/")),
             "branch must be the probed main"
         );
+    }
+
+    // Wave-2 discovery lanes. Each repo publishes one protocol-pure bare
+    // ip:port file per scheme; branches are the ones `git ls-remote --symref`
+    // reported on 2026-09-28, never hardcoded from the web UI default.
+    #[test]
+    fn wave2_feed_ids_are_registered() {
+        let ids: Vec<&str> = crate::providers::all().iter().map(|p| p.id()).collect();
+        for id in ["zaeem20", "tuanminpay", "mmpx12", "ercindedeguoglu"] {
+            assert!(ids.contains(&id), "missing {id}");
+        }
+    }
+
+    #[test]
+    fn wave2_feeds_target_the_probed_branches_and_protocol_pure_files() {
+        let expect: [(&str, &[&str]); 4] = [
+            (
+                "zaeem20",
+                &[
+                    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/http.txt",
+                    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/https.txt",
+                    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/socks4.txt",
+                    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/socks5.txt",
+                ],
+            ),
+            (
+                "tuanminpay",
+                &[
+                    "https://raw.githubusercontent.com/TuanMinPay/live-proxy/master/http.txt",
+                    "https://raw.githubusercontent.com/TuanMinPay/live-proxy/master/socks4.txt",
+                    "https://raw.githubusercontent.com/TuanMinPay/live-proxy/master/socks5.txt",
+                ],
+            ),
+            (
+                "mmpx12",
+                &[
+                    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
+                    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt",
+                    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt",
+                    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt",
+                ],
+            ),
+            (
+                "ercindedeguoglu",
+                &[
+                    "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt",
+                    "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt",
+                    "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks4.txt",
+                    "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks5.txt",
+                ],
+            ),
+        ];
+        let providers = crate::providers::all();
+        for (id, urls) in expect {
+            let p = providers.iter().find(|p| p.id() == id).expect(id);
+            let reqs = p.requests();
+            let got: Vec<&str> = reqs.iter().map(|r| r.url.as_str()).collect();
+            for u in urls {
+                assert!(got.contains(u), "{id} missing {u}");
+            }
+        }
     }
 }

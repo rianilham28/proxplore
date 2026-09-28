@@ -1,6 +1,6 @@
 # Free Proxy Source Catalog — 2026-09-28
 
-Six-lane research sweep; every non-"reported" entry was fetch-verified. §1/§2/§3 re-fetched end-to-end on 2026-09-28 (§10); §4–§6 last verified 2026-09-11/12.
+Six-lane research sweep; every non-"reported" entry was fetch-verified. §1/§2/§3 re-fetched end-to-end on 2026-09-28 (§10); a second 2026-09-28 wave added 4 new §3 feeds and recorded its rejections in §3a; §4–§6 last verified 2026-09-11/12.
 Verification legend: **live** = fetched and saw real data · **reported** = first-party docs/pages only · **blocked** = site up, scrapers refused · **dead** = gone (NXDOMAIN, 4xx/5xx, parked, or archived).
 
 ---
@@ -52,6 +52,20 @@ All entry points are `https://raw.githubusercontent.com/...` — no UA, no auth.
 | **zloi-user/hideip.me** | `.../zloi-user/hideip.me/main/http.txt` | 130+; frequent | Format `ip:port:COUNTRY_FULL` — 3 fields, full country names not ISO. | **live** (2026-09-28: 194 rows) |
 | **hookzof/socks5_list** | `.../hookzof/socks5_list/master/proxy.txt` | ~180–250; CI-refreshed | Protocol-pure SOCKS5 (RU/IR/VN/ID/BD heavy; Telegram-compatible lane). No creds baked in. | **live** (2026-09-28: **27,050** rows — the "~180–250" figure was two orders of magnitude stale) |
 | **roosterkid/openproxylist** | `.../roosterkid/openproxylist/main/SOCKS5_RAW.txt` | 6 rows ⚠️ | Decayed; IPv6_RAW removed. Marginal — prefer hookzof/monosans. | **live (marginal)** (2026-09-28: 4 rows, still decaying) |
+| **ErcinDedeoglu/proxies** | `.../ErcinDedeoglu/proxies/main/proxies/http.txt` | 64,902 http / 48,230 socks5; hourly | Branch `main`; files nest under `proxies/`. Largest hourly pool found in the 2026-09-28 wave (http 64.9k, https 3.2k, socks4 22.2k, socks5 48.2k distinct tokens). Wired as `ercindedeguoglu`. | **live** (2026-09-28: 138,457 output lines) |
+| **TuanMinPay/live-proxy** | `.../TuanMinPay/live-proxy/master/http.txt` | 8,556 http; hourly | `http.txt socks4.txt socks5.txt all.txt`, CI auto-update workflow. **No `https.txt` — that path 404s**, so the lane ships three protocol files, not four. Wired as `tuanminpay`. | **live** (2026-09-28: 44,409 output lines) |
+| **Zaeem20/FREE_PROXIES_LIST** | `.../Zaeem20/FREE_PROXIES_LIST/master/http.txt` | 191 http; hourly | Branch `master`. Cleanest small pool of the wave (http 191, https 576, socks4 86, socks5 333). Wired as `zaeem20`. | **live** (2026-09-28: 1,186 output lines) |
+| **mmpx12/proxy-list** | `.../mmpx12/proxy-list/master/http.txt` | 440 http; daily | `http.txt https.txt socks4.txt socks5.txt` + `tor-exit-nodes.txt` and per-IP `.ovpn` files (VPN out of scope). ⚠️ `http.txt` currently leads with a literal `error code: 502` line — the parser drops it, but the upstream occasionally serves an error body with 200. Wired as `mmpx12`. | **live** (2026-09-28: 1,591 output lines) |
+
+### 3a. Wave-2 discovery — rejected candidates (2026-09-28)
+
+| Candidate | Evidence | Verdict |
+|---|---|---|
+| sockslist.us (`/proxiesraw/*.txt`, `/api/v1/proxy`) | 404 on all four probed paths, 24.7 KB error shell, 0 tokens | **dead** — the API documented in third-party writeups no longer resolves |
+| OfficialPenguin/PROXY-List, MuRongPIG/Proxy-List, caliphdev/Proxy-List, UserR3X/proxy-list, yemixzy/proxy-list, ZEROSEB/proxylist-update-every-minute, 89trillion/free-proxy, clxrc/Proxy-List | `git ls-remote` returns no HEAD | **dead** — repos gone |
+| ShiftyTR/Proxy-List | 200 with 40 http / 661 socks4 tokens, but last commit to `http.txt` 2023-08-11 | **dead (stale)** — ≥3 years without refresh; size alone doesn't qualify |
+| proxy4parsing/proxy-list | 200 with 19,031 http tokens, last commit 2024-04-27 | **dead (stale)** |
+| clarketm/proxy-list | 400 lines in `proxy-list-raw.txt`, `last-status-update.txt` reads `Tue Mar 21 23:33:19 PDT 2023` | **dead (stale)** |
 
 ## 4. Node-subscription feeds (vmess/vless/trojan/ss/hysteria2/tuic — Clash Verge/mihomo/NekoBox/v2rayNG)
 
@@ -148,6 +162,10 @@ Scout lanes overlap by design; each host appears **once** in this catalog. Seen-
 | fate0/proxylist (live) vs fate0/getproxy (archived) | TxtFeeds vs GitHubFeeds | §3 / §8 — distinct repos, not a dup |
 
 ## 10. Independent verification log
+
+### 2026-09-28 — Wave-2 new-source discovery (post-catalog sweep)
+
+16 candidate repos/API endpoints shortlisted from a web sweep of keyless plain-GET proxy sources, then probed with the two-command pattern (HTTP status + distinct `ip:port` token count ≥10) and a `git ls-remote --symref` branch-first pass. Survivors (all bare `ip:port`, no creds, HTTP/HTTPS/SOCKS4/SOCKS5 only): **ErcinDedeoglu/proxies** (`main`; 64,902 / 3,185 / 22,154 / 48,230 tokens), **TuanMinPay/live-proxy** (`master`; 8,556 / 6,223 / 29,636, no https file), **Zaeem20/FREE_PROXIES_LIST** (`master`; 191 / 576 / 86 / 333), **mmpx12/proxy-list** (`master`; 440 / 213 / 661 / 279). Rejections and their evidence are in §3a — notably three large-token feeds (ShiftyTR 823, proxy4parsing 19,031, clarketm 400) that pass the size gate but whose last commit is 2023–2024, so they were classified stale rather than wired. All four survivors were wired as `gh!` rows in `github_feeds.rs` and smoke-run: exit 0 with 1,186 / 44,409 / 1,591 / 138,457 output lines. No new §1 keyless API or §2 HTML-page source cleared the gate this wave — the one API candidate (sockslist.us) 404s on every documented path.
 
 ### 2026-09-28 — full §1/§2/§3 re-fetch (this sweep, direct curl, scout labels not trusted)
 

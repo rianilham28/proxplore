@@ -1,6 +1,6 @@
 //! proxplore providers — every source, each identified by its exact id.
 //!
-//! The 16 cron-refreshed GitHub raw repos share one data table
+//! The 20 cron-refreshed GitHub raw repos share one data table
 //! (github_feeds.rs, composed on the GithubFeed base); the 15 sources with
 //! real logic — JSON APIs, pagination, bespoke HTML — own one module each.
 //! Everything is wired into `all()`; the filesystem guard in main.rs catches
