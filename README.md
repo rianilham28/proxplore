@@ -8,16 +8,19 @@ sibling and downstream consumer.
 
 ## Scope
 
-30 identified providers across the catalog's three keyless lanes
+36 identified providers across the catalog's three keyless lanes
 (`free-proxy-sources.md` documents the research behind every row):
 
-- **TXT/JSON/CSV APIs** — proxyscrape, geonode, databay, pubproxy, proxifly,
-  proxylister
-- **HTML list pages** — proxydb, free-proxy-list.net, spys (TXT mirror),
-  advanced.name, 89ip, ip3366
+- **TXT/JSON/CSV APIs** — proxyscrape (http plus the `ssl=yes` https subset),
+  geonode, databay, pubproxy, proxifly, proxylister, advanced.name,
+  m1noa-proxypool, proxygenerator1, spys (TXT mirror `spys.me/proxy.txt`
+  plus the socks sub-lists)
+- **HTML list pages** — proxydb, free-proxy-list.net (main list plus the
+  us-proxy sub-page textarea), 89ip, ip3366, scrappey
 - **GitHub raw feeds** — thespeedx, hproxy, monosans, databay-labs, xyzs996,
   aliilapro, vpslabcloud, iplocate, fate0, sunny9577, hideip-me, hookzof,
-  vakhov, rix4uni, blitzproxy, proxio-io, m1noa-proxypool, proxygenerator1
+  vakhov, rix4uni, blitzproxy, proxio-io, m1noa-proxypool, proxygenerator1,
+  roosterkid, ercindedeguoglu, tuanminpay, zaeem20, mmpx12
 
 Deliberately excluded: node-subscription formats (vmess/vless/trojan/ss),
 account-gated grants, and credential-leak "free socks5" pools.
