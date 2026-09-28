@@ -1,9 +1,12 @@
 //! ProxyScrape — keyless v4 public API, near-realtime pool.
 //!
-//! One request per protocol (``protocol=`` filters the feed; the ``proxytype``
-//! spelling is silently ignored); ``format=text`` + ``proxy_format=ipport``
-//! yields bare ip:port lines, so the default scheme is authoritative and the
-//! shared entries component covers it. The v4 endpoint returns the whole
+//! Four requests over three protocols (``protocol=`` filters the feed; the
+//! ``proxytype`` spelling is silently ignored); ``format=text`` +
+//! ``proxy_format=ipport`` yields bare ip:port lines, so the default scheme is
+//! authoritative and the shared entries component covers it. The https lane is
+//! the http feed re-filtered with ``ssl=yes`` — a yes/no boolean, not
+//! ``true`` (``ssl=true`` is a 400) — and that ssl-filtered slice is not a
+//! subset of the unfiltered http pool. The v4 endpoint returns the whole
 //! filtered pool in one response (no paging); the HTML page is a SPA.
 
 use std::sync::Arc;
