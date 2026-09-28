@@ -105,10 +105,35 @@ impl Provider for FreeProxyListNet {
                 .with(Some(Scheme::Https), ParseKind::Custom(parse_textarea)),
             Request::new("https://free-proxy-list.net/socks-proxy.html", "socks")
                 .with(None, ParseKind::Custom(parse_socks_columns)),
+            Request::new("https://free-proxy-list.net/us-proxy.html", "us")
+                .with(Some(Scheme::Http), ParseKind::Custom(parse_textarea)),
         ]
     }
 }
 
 pub fn new() -> Arc<dyn Provider> {
     Arc::new(FreeProxyListNet)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_cover_main_ssl_socks_and_us_pages() {
+        let urls: Vec<String> = FreeProxyListNet
+            .requests()
+            .iter()
+            .map(|r| r.url.clone())
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://free-proxy-list.net/",
+                "https://free-proxy-list.net/ssl-proxy.html",
+                "https://free-proxy-list.net/socks-proxy.html",
+                "https://free-proxy-list.net/us-proxy.html",
+            ]
+        );
+    }
 }
