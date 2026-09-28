@@ -237,9 +237,10 @@ Run:
 ```bash
 for u in socks.txt https.txt socks5.txt proxy-socks.txt; do
   printf '%s ' "$u"
-  curl -sS -o "/tmp/spys-$u" -w '%{http_code}\n' "http://spys.me/$u" || echo "err"
+  curl -sSL -o "/tmp/spys-$u" -w '%{http_code}\n' "http://spys.me/$u" || echo "err"
 done
 ```
+(`-L` required: spys.me 301-redirects to https — without it every candidate mis-classifies as a redirect, verified 2026-09-28.)
 Expected per URL: HTTP `200` AND body containing ≥10 `ip:port`-shaped tokens:
 ```bash
 grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{2,5}' "/tmp/spys-$u" | wc -l
